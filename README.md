@@ -8,10 +8,13 @@ running plurama app in one line, without juggling logins and bearer tokens:
 plurama-cli treina /api/describe
 plurama-cli treina '/api/trainings/?limit=10'
 plurama-cli treina /api/trainings/ -X POST --body '{"name":"Squat"}'
+plurama-cli tracker /api/today-board
+plurama-cli rhizome '/rest/contexts?q=Books'
 ```
 
 The first argument names the app, the second is the request path (query string
-included). Everything else mirrors curl.
+included). Everything else mirrors curl. The path prefix is the app's own —
+`/api` for treina and tracker, `/rest` for rhizome.
 
 | flag | meaning |
 |------|---------|
@@ -24,12 +27,27 @@ included). Everything else mirrors curl.
 `plurama-cli apps` lists the configured apps. The exit code is `0` for a 2xx
 response, `1` for any other HTTP status, and `2` for a local error.
 
+## The configured apps
+
+| app | endpoint | identity |
+|-----|----------|----------|
+| `treina` | `https://treina.eighttrigrams.net` | `admin` |
+| `tracker` | `https://tracker.eighttrigrams.net` | `daniel-machine`, the machine user bound to `daniel` |
+| `rhizome` | `http://127.0.0.1:3007` | none — local, unauthenticated |
+
+Two things follow from tracker being a *machine* user: reads are unrestricted,
+but writes pass the recording-mode gate, so a `POST` returns
+`{"dropped":true}` while recording is off. Rhizome has the same gate, plus it
+rejects any mutation whose body lacks a `reason` field.
+
 ## Authentication
 
-Each app is a JWT-authenticated web app. The CLI logs in via
+Most apps are JWT-authenticated. The CLI logs in via
 `POST /api/auth/login` on first use, caches the token under
 `~/.cache/plurama-cli/<app>.token` (mode `600`), and re-authenticates
-automatically when the server answers `401`.
+automatically when the server answers `401`. An app configured without a
+`:username` is treated as unauthenticated: no login, no `Authorization`
+header.
 
 Credentials come from one of two places:
 
@@ -43,9 +61,10 @@ Credentials come from one of two places:
 Either way the shape is the same:
 
 ```clojure
-{:treina {:base-url "https://treina.eighttrigrams.net"
-          :username "admin"
-          :password "…"}}
+{:treina  {:base-url "https://treina.eighttrigrams.net"
+           :username "admin"
+           :password "…"}
+ :rhizome {:base-url "http://127.0.0.1:3007"}}
 ```
 
 Keep that file at mode `600`; it is a plaintext password store.

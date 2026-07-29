@@ -84,7 +84,8 @@
   (http/request
    {:method method
     :uri (str base-url (if (str/starts-with? path "/") path (str "/" path)))
-    :headers (cond-> (assoc headers "Authorization" (str "Bearer " token))
+    :headers (cond-> headers
+               token (assoc "Authorization" (str "Bearer " token))
                body (assoc "Content-Type" "application/json"))
     :body body
     :throw false}))
@@ -130,11 +131,14 @@
   (println "Examples:")
   (println "  plurama-cli treina /api/describe")
   (println "  plurama-cli treina '/api/trainings/?limit=10'")
-  (println "  plurama-cli treina /api/trainings/ -X POST --body '{\"name\":\"Squat\"}'"))
+  (println "  plurama-cli treina /api/trainings/ -X POST --body '{\"name\":\"Squat\"}'")
+  (println "  plurama-cli tracker /api/today-board")
+  (println "  plurama-cli rhizome '/rest/contexts?q=Books'"))
 
 (defn- list-apps []
   (doseq [[app cfg] (sort-by key @credentials)]
-    (println (format "%-14s %s" (name app) (:base-url cfg)))))
+    (println (format "%-14s %-40s %s" (name app) (:base-url cfg)
+                     (or (:username cfg) "(no auth)")))))
 
 (defn- run [app path opts]
   (let [cfg (app-config app)
@@ -144,9 +148,10 @@
              :path path
              :body body
              :headers (parse-headers (:header opts))}
-        token (or (cached-token app) (login! app cfg))
+        auth? (some? (:username cfg))
+        token (when auth? (or (cached-token app) (login! app cfg)))
         resp (let [r (send-request cfg token req)]
-               (if (= 401 (:status r))
+               (if (and auth? (= 401 (:status r)))
                  (send-request cfg (login! app cfg) req)
                  r))]
     (print-response resp opts)
