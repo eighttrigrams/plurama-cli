@@ -61,9 +61,9 @@
   (or (:api-root cfg) "/api"))
 
 (defn- resolve-path
-  "Request paths are relative to the app's API root — `/api` unless the app
-  says otherwise (rhizome: `/rest`). A path that already starts with the root
-  is taken as given, so the older absolute form keeps working."
+  "Request paths are relative to the app's API root — `/api` unless the app's
+  config says otherwise via :api-root. A path that already starts with the
+  root is taken as given, so the older absolute form keeps working."
   [cfg path]
   (let [root (api-root cfg)
         path (if (str/starts-with? path "/") path (str "/" path))]

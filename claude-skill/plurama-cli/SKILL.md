@@ -16,9 +16,10 @@ plurama-cli treina /trainings/ -X POST -d '{"name":"Squat"}'
 
 Argument one is the app, argument two is the request path including its query
 string. Everything else mirrors curl. **Paths are relative to the app's API
-root** — `/api` for most apps, `/rest` for rhizome — so `/describe` means the
-same thing on every app. A path that already starts with the root is passed
-through unchanged (the older absolute form keeps working).
+root** — `/api` for every configured app (a per-app `:api-root` can override
+it) — so `/describe` means the same thing on every app. A path that already
+starts with the root is passed through unchanged (the older absolute form
+keeps working).
 
 Source: <https://github.com/eighttrigrams/plurama-cli> (public).
 
