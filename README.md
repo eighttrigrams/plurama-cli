@@ -36,6 +36,7 @@ response, `1` for any other HTTP status, and `2` for a local error.
 | `treina` | `https://treina.eighttrigrams.net` | `admin` |
 | `tracker` | `https://tracker.eighttrigrams.net` | `daniel-machine`, the machine user bound to `daniel` |
 | `rhizome` | `http://127.0.0.1:3007` | none — local, unauthenticated |
+| `blog` | `https://eighttrigrams.net` | none — read-only public API |
 
 Two things follow from tracker being a *machine* user: reads are unrestricted,
 but writes pass the recording-mode gate, so a `POST` returns
