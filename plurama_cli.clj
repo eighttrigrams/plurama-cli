@@ -57,22 +57,18 @@
      (.toPath f)
      (java.nio.file.attribute.PosixFilePermissions/fromString "rw-------"))))
 
-(defn- api-root [cfg]
-  (or (:api-root cfg) "/api"))
-
 (defn- resolve-path
-  "Request paths are relative to the app's API root — `/api` unless the app's
-  config says otherwise via :api-root. A path that already starts with the
-  root is taken as given, so the older absolute form keeps working."
-  [cfg path]
-  (let [root (api-root cfg)
-        path (if (str/starts-with? path "/") path (str "/" path))]
-    (if (or (= path root) (str/starts-with? path (str root "/")))
+  "Request paths are relative to `/api`, the one root every plurama app serves
+  its API under. A path that already starts with `/api` is taken as given, so
+  the older absolute form keeps working."
+  [path]
+  (let [path (if (str/starts-with? path "/") path (str "/" path))]
+    (if (or (= path "/api") (str/starts-with? path "/api/"))
       path
-      (str root path))))
+      (str "/api" path))))
 
-(defn- login! [app {:keys [base-url username password] :as cfg}]
-  (let [resp (http/post (str base-url (api-root cfg) "/auth/login")
+(defn- login! [app {:keys [base-url username password]}]
+  (let [resp (http/post (str base-url "/api/auth/login")
                         {:headers {"Content-Type" "application/json"}
                          :body (json/generate-string {:username username :password password})
                          :throw false})]
@@ -94,10 +90,10 @@
       (slurp (subs body 1))
       body)))
 
-(defn- send-request [{:keys [base-url] :as cfg} token {:keys [method path body headers]}]
+(defn- send-request [{:keys [base-url]} token {:keys [method path body headers]}]
   (http/request
    {:method method
-    :uri (str base-url (resolve-path cfg path))
+    :uri (str base-url (resolve-path path))
     :headers (cond-> headers
                token (assoc "Authorization" (str "Bearer " token))
                body (assoc "Content-Type" "application/json"))
@@ -149,12 +145,12 @@
   (println "  plurama-cli tracker /today-board")
   (println "  plurama-cli rhizome '/contexts?q=Books'")
   (println)
-  (println "Paths are relative to the app's API root (see `apps`); a path that")
-  (println "already starts with the root is passed through unchanged."))
+  (println "Paths are relative to /api, where every plurama app serves its API;")
+  (println "a path that already starts with /api is passed through unchanged."))
 
 (defn- list-apps []
   (doseq [[app cfg] (sort-by key @credentials)]
-    (println (format "%-14s %-40s %s" (name app) (str (:base-url cfg) (api-root cfg))
+    (println (format "%-14s %-40s %s" (name app) (str (:base-url cfg) "/api")
                      (or (:username cfg) "(no auth)")))))
 
 (defn- run [app path opts]

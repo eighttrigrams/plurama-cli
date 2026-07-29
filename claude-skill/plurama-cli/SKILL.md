@@ -15,11 +15,10 @@ plurama-cli treina /trainings/ -X POST -d '{"name":"Squat"}'
 ```
 
 Argument one is the app, argument two is the request path including its query
-string. Everything else mirrors curl. **Paths are relative to the app's API
-root** — `/api` for every configured app (a per-app `:api-root` can override
-it) — so `/describe` means the same thing on every app. A path that already
-starts with the root is passed through unchanged (the older absolute form
-keeps working).
+string. Everything else mirrors curl. **Paths are relative to `/api`**, the
+one root every plurama app serves its API under — so `/describe` means the
+same thing on every app. A path that already starts with `/api` is passed
+through unchanged (the older absolute form keeps working).
 
 Source: <https://github.com/eighttrigrams/plurama-cli> (public).
 
@@ -100,10 +99,9 @@ Re-run it after rotating a password, adding an app, or changing the CLI.
 Two edits, both one-liners:
 
 1. `deploy-plurama-cli` in the private workspace — add a row to the `APPS`
-   array: `"<app>|<base-url>|<username>|<sops-extract-path>|<api-root>"`. The
-   sops path names the password in `secrets.yaml`; username and sops path stay
-   empty for an unauthenticated app; api-root is optional and defaults to
-   `/api`.
+   array: `"<app>|<base-url>|<username>|<sops-extract-path>"`. The sops path
+   names the password in `secrets.yaml`; username and sops path stay empty
+   for an unauthenticated app.
 2. Re-run `./deploy-plurama-cli`.
 
 The CLI itself needs no change; it is driven entirely by the baked credential

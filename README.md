@@ -13,10 +13,10 @@ plurama-cli rhizome '/contexts?q=Books'
 ```
 
 The first argument names the app, the second is the request path (query string
-included). Everything else mirrors curl. Paths are relative to the app's API
-root — `/api`, unless an app's config overrides it via `:api-root` — so the
-same `/describe` works everywhere. A path that already starts with the root
-is passed through unchanged, so the older absolute form keeps working.
+included). Everything else mirrors curl. Paths are relative to `/api`, the
+one root every plurama app serves its API under — so the same `/describe`
+works everywhere. A path that already starts with `/api` is passed through
+unchanged, so the older absolute form keeps working.
 
 | flag | meaning |
 |------|---------|
