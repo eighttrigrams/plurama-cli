@@ -5,16 +5,18 @@ apps. It exists so that a shell — or an agent driving a shell — can talk to 
 running plurama app in one line, without juggling logins and bearer tokens:
 
 ```bash
-plurama-cli treina /api/describe
-plurama-cli treina '/api/trainings/?limit=10'
-plurama-cli treina /api/trainings/ -X POST --body '{"name":"Squat"}'
-plurama-cli tracker /api/today-board
-plurama-cli rhizome '/rest/contexts?q=Books'
+plurama-cli treina /describe
+plurama-cli treina '/trainings/?limit=10'
+plurama-cli treina /trainings/ -X POST --body '{"name":"Squat"}'
+plurama-cli tracker /today-board
+plurama-cli rhizome '/contexts?q=Books'
 ```
 
 The first argument names the app, the second is the request path (query string
-included). Everything else mirrors curl. The path prefix is the app's own —
-`/api` for treina and tracker, `/rest` for rhizome.
+included). Everything else mirrors curl. Paths are relative to the app's API
+root — `/api` unless the app's config says otherwise (rhizome: `/rest`) — so
+the same `/describe` works everywhere. A path that already starts with the
+root is passed through unchanged, so the older absolute form keeps working.
 
 | flag | meaning |
 |------|---------|
@@ -64,7 +66,8 @@ Either way the shape is the same:
 {:treina  {:base-url "https://treina.eighttrigrams.net"
            :username "admin"
            :password "…"}
- :rhizome {:base-url "http://127.0.0.1:3007"}}
+ :rhizome {:base-url "http://127.0.0.1:3007"
+           :api-root "/rest"}}
 ```
 
 Keep that file at mode `600`; it is a plaintext password store.
@@ -78,4 +81,4 @@ Requires [babashka](https://babashka.org) and
 bbin install https://raw.githubusercontent.com/eighttrigrams/plurama-cli/main/plurama_cli.clj --as plurama-cli
 ```
 
-Or run it straight from a checkout: `bb plurama_cli.clj treina /api/describe`.
+Or run it straight from a checkout: `bb plurama_cli.clj treina /describe`.

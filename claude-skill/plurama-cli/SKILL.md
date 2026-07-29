@@ -9,13 +9,16 @@ description: How to talk to the deployed plurama apps (treina, tracker, personal
 the live plurama apps. It is the way to read and write live app data from a shell.
 
 ```bash
-plurama-cli treina /api/describe
-plurama-cli treina /api/trainings/
-plurama-cli treina /api/trainings/ -X POST -d '{"name":"Squat"}'
+plurama-cli treina /describe
+plurama-cli treina /trainings/
+plurama-cli treina /trainings/ -X POST -d '{"name":"Squat"}'
 ```
 
 Argument one is the app, argument two is the request path including its query
-string. Everything else mirrors curl.
+string. Everything else mirrors curl. **Paths are relative to the app's API
+root** — `/api` for most apps, `/rest` for rhizome — so `/describe` means the
+same thing on every app. A path that already starts with the root is passed
+through unchanged (the older absolute form keeps working).
 
 Source: <https://github.com/eighttrigrams/plurama-cli> (public).
 
@@ -29,22 +32,23 @@ Source: <https://github.com/eighttrigrams/plurama-cli> (public).
 | `-i, --include` | Print status line and response headers. |
 | `--raw` | Do not pretty-print JSON responses. |
 
-`plurama-cli apps` lists the configured apps and their base URLs. Exit codes:
+`plurama-cli apps` lists the configured apps with their API roots. Exit codes:
 `0` for 2xx, `1` for any other HTTP status, `2` for a local error (unknown app,
 failed login, no credentials).
 
 Quote paths that contain `?` or `&` so the shell keeps them intact:
-`plurama-cli treina '/api/trainings/?limit=10'`.
+`plurama-cli treina '/trainings/?limit=10'`.
 
 ## Discover the API before guessing
 
-Every plurama app serves **`GET /api/describe`** — a self-description of each
-route, with `:method`, `:path` and the handler's docstring. That endpoint is the
+Every plurama app serves **`GET /describe`** under its API root — a
+self-description of each route, with `:method`, `:path` and the handler's
+docstring. That endpoint is the
 authoritative reference for paths, query params, body fields and error cases.
 Read it first; never invent an endpoint from memory.
 
 ```bash
-plurama-cli treina /api/describe | jq '.[] | {method, path}'
+plurama-cli treina /describe | jq '.[] | {method, path}'
 ```
 
 ## Authentication, and what that implies
@@ -95,8 +99,10 @@ Re-run it after rotating a password, adding an app, or changing the CLI.
 Two edits, both one-liners:
 
 1. `deploy-plurama-cli` in the private workspace — add a row to the `APPS`
-   array: `"<app>|<base-url>|<username>|<secrets-app>|<secrets-key>"`, where the
-   last two name the path in `secrets.yaml`.
+   array: `"<app>|<base-url>|<username>|<sops-extract-path>|<api-root>"`. The
+   sops path names the password in `secrets.yaml`; username and sops path stay
+   empty for an unauthenticated app; api-root is optional and defaults to
+   `/api`.
 2. Re-run `./deploy-plurama-cli`.
 
 The CLI itself needs no change; it is driven entirely by the baked credential
