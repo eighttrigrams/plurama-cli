@@ -156,7 +156,11 @@
   (println "    --body '{\"sender\":\"Plurama Development Coordinator\",\"title\":\"...\"}'")
   (println)
   (println "Paths are relative to /api, where every plurama app serves its API;")
-  (println "a path that already starts with /api is passed through unchanged."))
+  (println "a path that already starts with /api is passed through unchanged.")
+  (println)
+  (println "Single-quote anything with a query string or a JSON body: in zsh an")
+  (println "unquoted ? is a glob and fails outright, and & would background the")
+  (println "command. Plain paths need no quotes."))
 
 (defn- list-apps []
   (doseq [[app cfg] (sort-by key @credentials)]
