@@ -138,12 +138,22 @@
   (println "  -i, --include         Print status line and response headers")
   (println "      --raw             Do not pretty-print JSON responses")
   (println)
+  ;; Listed from the baked credentials rather than hardcoded, so a target added
+  ;; by the deploy script shows up here without this text going stale.
+  (println "Configured apps:")
+  (if-let [apps (seq (sort (map name (keys @credentials))))]
+    (println "  " (str/join ", " apps))
+    (println "   (none — no baked credentials and no credentials.edn)"))
+  (println "  Run 'plurama-cli apps' for each one's endpoint and identity.")
+  (println)
   (println "Examples:")
   (println "  plurama-cli treina /describe")
   (println "  plurama-cli treina '/trainings/?limit=10'")
   (println "  plurama-cli treina /trainings/ -X POST --body '{\"name\":\"Squat\"}'")
   (println "  plurama-cli tracker /today-board")
   (println "  plurama-cli rhizome '/contexts?q=Books'")
+  (println "  plurama-cli tracker-just-msg /messages \\")
+  (println "    --body '{\"sender\":\"Plurama Development Coordinator\",\"title\":\"...\"}'")
   (println)
   (println "Paths are relative to /api, where every plurama app serves its API;")
   (println "a path that already starts with /api is passed through unchanged."))
