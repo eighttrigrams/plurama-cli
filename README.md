@@ -35,6 +35,7 @@ response, `1` for any other HTTP status, and `2` for a local error.
 |-----|----------|----------|
 | `treina` | `https://treina.eighttrigrams.net` | `admin` |
 | `tracker` | `https://tracker.eighttrigrams.net` | `daniel-machine`, the machine user bound to `daniel` |
+| `tracker-just-msg` | `https://tracker.eighttrigrams.net` | `plurama-development`, a **mail-only** machine user bound to `daniel` |
 | `rhizome` | `http://127.0.0.1:3007` | none — local, unauthenticated |
 | `blog` | `https://eighttrigrams.net` | none — read-only public API |
 
@@ -42,6 +43,22 @@ Two things follow from tracker being a *machine* user: reads are unrestricted,
 but writes pass the recording-mode gate, so a `POST` returns
 `{"dropped":true}` while recording is off. Rhizome has the same gate, plus it
 rejects any mutation whose body lacks a `reason` field.
+
+`tracker-just-msg` points at the same tracker, but its user carries
+`mail-only`, which means the recording gate drops **every** mutating request
+except the gate-exempt ones. In practice that leaves exactly one useful write:
+
+```bash
+plurama-cli tracker-just-msg /messages \
+  --body '{"sender":"Plurama Development Coordinator","title":"Need your input on X"}'
+```
+
+Post as **`Plurama Development Coordinator`** — that is the sender this target
+is meant to appear under in the inbox.
+
+Use it when something needs to reach the inbox and nothing else should be
+writable — it cannot create tasks, edit anything, or delete. Reads still work,
+so it is also the safest target for a quick look at the inbox.
 
 ## Authentication
 

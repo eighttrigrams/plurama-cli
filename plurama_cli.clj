@@ -150,7 +150,7 @@
 
 (defn- list-apps []
   (doseq [[app cfg] (sort-by key @credentials)]
-    (println (format "%-14s %-40s %s" (name app) (str (:base-url cfg) "/api")
+    (println (format "%-18s %-40s %s" (name app) (str (:base-url cfg) "/api")
                      (or (:username cfg) "(no auth)")))))
 
 (defn- run [app path opts]
