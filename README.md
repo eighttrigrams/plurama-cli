@@ -37,7 +37,16 @@ response, `1` for any other HTTP status, and `2` for a local error.
 | `tracker` | `https://tracker.eighttrigrams.net` | `daniel-machine`, the machine user bound to `daniel` |
 | `tracker-just-msg` | `https://tracker.eighttrigrams.net` | `plurama-development`, a **mail-only** machine user bound to `daniel` |
 | `rhizome` | `http://127.0.0.1:3007` | none — local, unauthenticated |
-| `blog` | `https://eighttrigrams.net` | none — read-only public API |
+| `blog` | `https://eighttrigrams.net` | `notes-user` — may `POST /api/notes` to deliver a Note, and nothing else |
+
+Blog's `notes-user` is the narrowest identity here: it authorises exactly one write.
+Every read stays public, and a notes token presented to a read is **ignored** rather
+than rejected — `GET /api/articles` answers 200 with or without it — so the credential
+never changes what the API returns.
+
+```bash
+plurama-cli blog /notes --body '{"title":"Read this","description":"…"}'
+```
 
 Two things follow from tracker being a *machine* user: reads are unrestricted,
 but writes pass the recording-mode gate, so a `POST` returns
