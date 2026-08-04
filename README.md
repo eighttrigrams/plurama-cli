@@ -148,9 +148,14 @@ cookbook-tui
 It lists Recipes as **title + useful-when only** — the lean projection is the
 point, so it does not fetch bodies it is not showing — then `<n>` opens one in
 full, `n` writes a new one, `/text` searches, `e` edits, `v` shows the version
-history, `q` quits. A body is a markdown document, so editing one opens
-`$EDITOR` (or `$VISUAL`); the two short fields are prompted inline, and leaving a
+history, `q` quits. The two short fields are prompted inline, and leaving a
 prompt blank keeps the current value.
+
+Bodies are edited **in the tool**, not in `$EDITOR` — it is a TUI and it stays
+one. A new body is typed straight in and ended with a lone `.`; an existing one is
+shown numbered and edited a line at a time (`a` append, `i N` insert before,
+`r N` replace, `d N` delete, `c` clear, `w` done), because retyping a whole Recipe
+to change one word is not editing.
 
 Markdown is printed **raw**. It is a text format and reads fine as text; a
 terminal renderer with Clojure highlighting would be a project of its own.

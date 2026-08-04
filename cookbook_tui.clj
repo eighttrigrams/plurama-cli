@@ -24,7 +24,6 @@
   agent that scans title and useful-when to decide what is relevant and then
   fetches exactly one body. This tool reads the same way."
   (:require [babashka.http-client :as http]
-            [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
@@ -104,20 +103,29 @@
 
 (defn- api
   "One request, retried once after a fresh login on a 401 — a cached token
-  outlives a password rotation otherwise."
+  outlives a password rotation otherwise.
+
+  A config with **no `:username`** is treated as unauthenticated: no login, no
+  `Authorization` header, no retry. That is the same rule `plurama_cli.clj`
+  applies, and it is what makes a local dev cookbook drivable — dev runs with
+  `:dangerously-skip-logins?`, so there is no machine user to log in as, and
+  logging in unconditionally would 401 against the one target where no credential
+  is needed."
   ([method path] (api method path nil))
   ([method path body]
-   (let [{:keys [base-url]} @config
+   (let [{:keys [base-url username]} @config
+         auth? (some? username)
          send (fn [token]
                 (http/request
                  (cond-> {:method method
                           :uri (str base-url path)
-                          :headers {"Authorization" (str "Bearer " token)}
+                          :headers {}
                           :throw false}
+                   token (update :headers assoc "Authorization" (str "Bearer " token))
                    body (assoc :body (json/generate-string body))
                    body (update :headers assoc "Content-Type" "application/json"))))
-         resp (send (or (cached-token) (login!)))
-         resp (if (= 401 (:status resp)) (send (login!)) resp)]
+         resp (send (when auth? (or (cached-token) (login!))))
+         resp (if (and auth? (= 401 (:status resp))) (send (login!)) resp)]
      {:status (:status resp)
       :body (when (seq (:body resp))
               (try (json/parse-string (:body resp) true)
@@ -182,25 +190,60 @@
   (let [v (prompt (str label " [" (or current "") "]: "))]
     (if (str/blank? v) current v)))
 
+(defn- read-lines
+  "Lines until a lone `.` — the convention mail clients used for the same job."
+  []
+  (loop [lines []]
+    (let [l (read-line)]
+      (if (or (nil? l) (= "." l))
+        lines
+        (recur (conj lines l))))))
+
+(defn- show-body [lines]
+  (if (empty? lines)
+    (println "  (empty)")
+    (doseq [[i l] (map-indexed vector lines)]
+      (println (format "  %2d  %s" (inc i) l)))))
+
 (defn- edit-body
-  "A markdown body is a document, so it goes to $EDITOR rather than through
-  read-line. Falls back to a lone `.` terminator where no editor is configured."
+  "Bodies are edited **here**, not in `$EDITOR`. This is a TUI and it stays one:
+  shelling out makes the tool unusable wherever no editor is configured, and it
+  hands the terminal to a process whose exit conditions this loop does not
+  control.
+
+  A new body is typed straight in and ended with a lone `.`. An existing one is
+  shown numbered and edited a line at a time, because retyping a whole Recipe to
+  change one word is not editing."
   [current]
-  (if-let [editor (or (System/getenv "VISUAL") (System/getenv "EDITOR"))]
-    (let [f (java.io.File/createTempFile "cookbook-" ".md")]
-      (try
-        (spit f (or current ""))
-        (p/shell (str editor " " (.getAbsolutePath f)))
-        (str/trim-newline (slurp f))
-        (finally (.delete f))))
-    (do
-      (println "No $EDITOR set. Type the body; end with a single '.' on its own line.")
-      (when (seq (or current "")) (println "--- current ---") (println current) (println "---"))
-      (loop [lines []]
-        (let [l (read-line)]
-          (if (or (nil? l) (= "." l))
-            (str/join "\n" lines)
-            (recur (conj lines l))))))))
+  (let [lines (if (str/blank? (or current "")) [] (vec (str/split-lines current)))]
+    (if (empty? lines)
+      (do (println "Body — type it, and end with a single '.' on its own line.")
+          (str/join "\n" (read-lines)))
+      (loop [lines lines]
+        (println)
+        (show-body lines)
+        (println "  a append · i N insert before · r N replace · d N delete · c clear · w done")
+        (let [in (str/trim (or (prompt "body> ") "w"))
+              [cmd arg] (str/split in #"\s+" 2)
+              n (some-> arg str/trim parse-long)
+              idx (when (and n (<= 1 n (count lines))) (dec n))
+              need-n (fn [] (println "  that needs a line number in range") lines)]
+          (case cmd
+            ("w" "") (str/join "\n" lines)
+            "c" (recur [])
+            "a" (do (println "  appending — end with '.'")
+                    (recur (into lines (read-lines))))
+            "i" (if idx
+                  (do (println (str "  inserting before line " n " — end with '.'"))
+                      (recur (vec (concat (subvec lines 0 idx) (read-lines) (subvec lines idx)))))
+                  (recur (need-n)))
+            "r" (if idx
+                  (recur (assoc lines idx (or (prompt (str "  " n "> ")) "")))
+                  (recur (need-n)))
+            "d" (if idx
+                  (recur (vec (concat (subvec lines 0 idx) (subvec lines (inc idx)))))
+                  (recur (need-n)))
+            (do (println "  ?") (recur lines))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Actions.
