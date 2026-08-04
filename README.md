@@ -38,6 +38,7 @@ response, `1` for any other HTTP status, and `2` for a local error.
 | `tracker-just-msg` | `https://tracker.eighttrigrams.net` | `plurama-development`, a **mail-only** machine user bound to `daniel` |
 | `rhizome` | `http://127.0.0.1:3007` | none — local, unauthenticated |
 | `blog` | `https://eighttrigrams.net` | `notes-user` — may `POST /api/notes` to deliver a Note, and nothing else |
+| `cookbook` | `https://cookbook.eighttrigrams.net` | `machine-user` — writes **unsupervised**; the one thing it cannot do is cross the publish latch |
 
 Blog's `notes-user` is the narrowest identity here: it authorises exactly one write.
 Every read stays public, and a notes token presented to a read is **ignored** rather
@@ -52,6 +53,31 @@ Two things follow from tracker being a *machine* user: reads are unrestricted,
 but writes pass the recording-mode gate, so a `POST` returns
 `{"dropped":true}` while recording is off. Rhizome has the same gate, plus it
 rejects any mutation whose body lacks a `reason` field.
+
+**Cookbook is the deliberate exception, and it matters because the gate fails
+quietly.** Do not carry the rule above over to it: cookbook has **no**
+recording-mode gate at all, by design. It is an agentic memory store, so a
+credentialled client writes freely and unsupervised — there is no toggle, and
+`{"dropped":true}` is not a thing that can come back from it. A reader who
+assumes the house rule would conclude their writes were being dropped when they
+are landing.
+
+Its one boundary is the **publish latch**. Recipes are private by default;
+publishing makes one public *and* freezes it against machine mutation, in a
+single irreversible step — so publishing is an act of taking ownership rather
+than just of visibility, and there is no unpublish. Concretely, `machine-user`
+may read everything, create Recipes, and edit or delete **unpublished** ones
+without ceremony; editing, deleting or publishing a **published** Recipe is a
+`403` that no switch lifts.
+
+```bash
+plurama-cli cookbook /recipes                     # title + useful-when only
+plurama-cli cookbook '/recipes/7?detail=full'     # …and the body
+```
+
+The listing is lean on purpose rather than as an optimisation: the reader here is
+an agent, so it scans title and useful-when to decide what is relevant and then
+fetches exactly one body.
 
 `tracker-just-msg` points at the same tracker, but its user carries
 `mail-only`, which means the recording gate drops **every** mutating request
@@ -108,3 +134,39 @@ bbin install https://raw.githubusercontent.com/eighttrigrams/plurama-cli/main/pl
 ```
 
 Or run it straight from a checkout: `bb plurama_cli.clj treina /describe`.
+
+## `cookbook-tui` — a second binary in this repo
+
+`cookbook_tui.clj` is a line-based browser and editor for cookbook, installed as
+its own command **alongside** `plurama-cli`. One run of the private
+`deploy-plurama-cli.sh` puts both on `PATH`, from the same credential blob.
+
+```bash
+cookbook-tui
+```
+
+It lists Recipes as **title + useful-when only** — the lean projection is the
+point, so it does not fetch bodies it is not showing — then `<n>` opens one in
+full, `n` writes a new one, `/text` searches, `e` edits, `v` shows the version
+history, `q` quits. A body is a markdown document, so editing one opens
+`$EDITOR` (or `$VISUAL`); the two short fields are prompted inline, and leaving a
+prompt blank keeps the current value.
+
+Markdown is printed **raw**. It is a text format and reads fine as text; a
+terminal renderer with Clojure highlighting would be a project of its own.
+
+It authenticates as `machine-user`, so it inherits exactly that identity's one
+limit: **it cannot edit or delete a published Recipe, and it cannot publish.**
+Those come back as explanations rather than as a bare `403`. The `p` command
+exists and asks for confirmation — publishing is irreversible — but publishing is
+the owner's act, done from the web UI, so from here it is expected to be refused.
+
+Run it from a checkout without installing: `bb cookbook_tui.clj`. Unbaked, it
+reads `~/.config/plurama-cli/credentials.edn`, so a `:cookbook` entry pointing at
+`http://127.0.0.1:3170` is enough to drive a local cookbook. It shares
+`~/.cache/plurama-cli/cookbook.token` with `plurama-cli`, so signing in through
+either serves both.
+
+It reads **only** its own `:cookbook` entry. The baked blob is a map of every
+configured app — the same map already inside the `plurama-cli` binary at mode
+`700`, so not new exposure — and nothing here prints it or any other app's row.
