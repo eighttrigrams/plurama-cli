@@ -10,8 +10,25 @@
 
 (def ^:private baked-credentials
   "Base64-encoded EDN, substituted at install time by the private
-  `deploy-plurama-cli` script. Left as the literal marker in the public repo."
+  `deploy-plurama-cli-cookbook-tui-and-us-vs-them-cli.sh` script. Left as the
+  literal marker in the public repo."
   "__BAKED_CREDENTIALS__")
+
+(defn- apply-proxy-env!
+  "Point the JDK at the proxy named by HTTP(S)_PROXY.
+
+  A locked devbox has no gateway, so its egress proxy is the only way out, and
+  it is announced through that env var. curl reads it; babashka.http-client
+  sits on java.net.http.HttpClient, which reads only the system properties
+  below — so without this the CLI has no route out of a box at all."
+  []
+  (doseq [scheme ["http" "https"]
+          :let [url (System/getenv (str/upper-case (str scheme "_proxy")))]
+          :when (not (str/blank? url))]
+    (let [uri (java.net.URI. url)
+          port (.getPort uri)]
+      (System/setProperty (str scheme ".proxyHost") (.getHost uri))
+      (System/setProperty (str scheme ".proxyPort") (str (if (pos? port) port 80))))))
 
 (def ^:private credentials-file
   (io/file (System/getProperty "user.home") ".config" "plurama-cli" "credentials.edn"))
@@ -185,6 +202,7 @@
     (if (<= 200 (:status resp) 299) 0 1)))
 
 (defn -main [& args]
+  (apply-proxy-env!)
   (let [{:keys [opts args]} (cli/parse-args args {:spec cli-spec :aliases cli-aliases})
         [app path] args]
     (cond

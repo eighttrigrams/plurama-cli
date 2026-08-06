@@ -82,7 +82,7 @@ Installation lives in the **private** `plurama.eighttrigrams` workspace, not in
 the public CLI repo:
 
 ```bash
-./deploy-plurama-cli
+./deploy-plurama-cli-cookbook-tui-and-us-vs-them-cli.sh
 ```
 
 It installs from the local `plurama-cli/` checkout — pull that repo first if you
@@ -98,11 +98,12 @@ Re-run it after rotating a password, adding an app, or changing the CLI.
 
 Two edits, both one-liners:
 
-1. `deploy-plurama-cli` in the private workspace — add a row to the `APPS`
+1. `deploy-plurama-cli-cookbook-tui-and-us-vs-them-cli.sh` in the private
+   workspace — add a row to the `APPS`
    array: `"<app>|<base-url>|<username>|<sops-extract-path>"`. The sops path
    names the password in `secrets.yaml`; username and sops path stay empty
    for an unauthenticated app.
-2. Re-run `./deploy-plurama-cli`.
+2. Re-run `./deploy-plurama-cli-cookbook-tui-and-us-vs-them-cli.sh`.
 
 The CLI itself needs no change; it is driven entirely by the baked credential
 map. Apps must expose the standard plurama auth surface (`POST /api/auth/login`
@@ -113,7 +114,8 @@ returning `{:token …}`).
 - **`plurama-cli: unknown app: X`** — X is not in the baked map. See "Adding
   another app"; the error lists what is configured.
 - **`command not found`** — not installed on this machine, or `~/.local/bin` is
-  not on `PATH`. Ask the human to run `./deploy-plurama-cli`; do not try to
+  not on `PATH`. Ask the human to run
+  `./deploy-plurama-cli-cookbook-tui-and-us-vs-them-cli.sh`; do not try to
   reconstruct credentials yourself.
 - **`login … failed: HTTP 401`** — the baked password is stale. The human should
   re-run the deploy script after fixing `secrets.yaml`.

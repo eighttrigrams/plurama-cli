@@ -39,7 +39,8 @@
 
 (def ^:private baked-credentials
   "Base64-encoded EDN, substituted at install time by the private
-  `deploy-plurama-cli` script. Left as the literal marker in the public repo."
+  `deploy-plurama-cli-cookbook-tui-and-us-vs-them-cli.sh` script. Left as the
+  literal marker in the public repo."
   "__BAKED_CREDENTIALS__")
 
 (def ^:private credentials-file
@@ -64,7 +65,8 @@
   (delay
     (or (:cookbook (or (decode-baked) (read-credentials-file) {}))
         (throw (ex-info (str "no cookbook credential. Either install with "
-                             "deploy-plurama-cli.sh, or add a :cookbook entry to "
+                             "deploy-plurama-cli-cookbook-tui-and-us-vs-them-cli.sh, "
+                             "or add a :cookbook entry to "
                              credentials-file)
                         {})))))
 

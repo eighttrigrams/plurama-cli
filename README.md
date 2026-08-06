@@ -139,7 +139,8 @@ Or run it straight from a checkout: `bb plurama_cli.clj treina /describe`.
 
 `cookbook_tui.clj` is a line-based browser and editor for cookbook, installed as
 its own command **alongside** `plurama-cli`. One run of the private
-`deploy-plurama-cli.sh` puts both on `PATH`, from the same credential blob.
+`deploy-plurama-cli-cookbook-tui-and-us-vs-them-cli.sh` puts both on `PATH`,
+from the same credential blob.
 
 ```bash
 cookbook-tui
