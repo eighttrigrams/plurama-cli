@@ -6,7 +6,7 @@ running plurama app in one line, without juggling logins and bearer tokens:
 
 ```bash
 plurama-cli treina /describe
-plurama-cli treina '/trainings/?limit=10'
+plurama-cli treina '/trainings/?search=squat'
 plurama-cli treina /trainings/ -X POST --body '{"name":"Squat"}'
 plurama-cli tracker /today-board
 plurama-cli rhizome '/contexts?q=Books'

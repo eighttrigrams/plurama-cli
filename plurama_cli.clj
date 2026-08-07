@@ -165,7 +165,7 @@
   (println)
   (println "Examples:")
   (println "  plurama-cli treina /describe")
-  (println "  plurama-cli treina '/trainings/?limit=10'")
+  (println "  plurama-cli treina '/trainings/?search=squat'")
   (println "  plurama-cli treina /trainings/ -X POST --body '{\"name\":\"Squat\"}'")
   (println "  plurama-cli tracker /today-board")
   (println "  plurama-cli rhizome '/contexts?q=Books'")

@@ -37,7 +37,7 @@ Source: <https://github.com/eighttrigrams/plurama-cli> (public).
 failed login, no credentials).
 
 Quote paths that contain `?` or `&` so the shell keeps them intact:
-`plurama-cli treina '/trainings/?limit=10'`.
+`plurama-cli treina '/trainings/?search=squat'`.
 
 ## Discover the API before guessing
 
