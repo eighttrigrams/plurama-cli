@@ -14,6 +14,29 @@
   literal marker in the public repo."
   "__BAKED_CREDENTIALS__")
 
+(def ^:private tool-name
+  "What to call this program in its own help — **read off the invocation, not
+  baked in**.
+
+  One source yields more than one binary: a full `plurama-cli`, and a
+  `plurama-cli-restricted` carrying only cookbook and the mail-only tracker
+  target, which is what the devboxes mount. So the help has to name itself, or a
+  restricted build would tell a sandboxed agent to run a binary it does not have.
+
+  This was first done by substituting the name at install time, next to the
+  credentials. That version lied the moment the file was called anything else —
+  copy the binary, rename it, mount it elsewhere, and it still announced the name
+  it was built under. `babashka.file` is the path babashka was actually handed,
+  so this cannot disagree with reality however the file is named or mounted.
+
+  Falls back for the checkout: run straight from source the path ends in `.clj`,
+  and `plurama_cli.clj` is a filename rather than a command anyone types."
+  (let [invoked (some-> (System/getProperty "babashka.file")
+                        java.io.File. .getName)]
+    (if (or (str/blank? invoked) (str/ends-with? invoked ".clj"))
+      "plurama-cli"
+      invoked)))
+
 (defn- apply-proxy-env!
   "Point the JDK at the proxy named by HTTP(S)_PROXY.
 
@@ -142,9 +165,39 @@
 (def ^:private cli-aliases
   {:X :method :d :body :H :header :i :include :h :help})
 
+(def ^:private examples-by-app
+  "Example invocations, filed under the app each one needs, minus the program
+  name. Printed only for apps this build actually carries.
+
+  Hardcoded examples are how the help came to advertise a treina `?limit` that
+  treina has never implemented — a filter somebody then reported as broken. A
+  restricted build listing `rhizome` and `tracker` would fail the same way and
+  more often, since those targets are absent rather than merely unhelpful.
+
+  The order here is the order they print in; apps not baked in simply drop out."
+  [["treina"           ["treina /describe"]]
+   ["treina"           ["treina '/trainings/?search=squat'"]]
+   ["treina"           ["treina /trainings/ -X POST --body '{\"name\":\"Squat\"}'"]]
+   ["tracker"          ["tracker /today-board"]]
+   ["rhizome"          ["rhizome '/contexts?q=Books'"]]
+   ["cookbook"         ["cookbook '/recipes?search=docker'"]]
+   ["tracker-just-msg" ["tracker-just-msg /messages \\"
+                        "    --body '{\"sender\":\"Plurama Development Coordinator\",\"title\":\"...\"}'"]]])
+
+(defn- print-examples [configured]
+  (let [shown (for [[app lines] examples-by-app
+                    :when (contains? configured app)]
+                lines)]
+    (when (seq shown)
+      (println "Examples:")
+      (doseq [[head & tail] shown]
+        (println (str "  " tool-name " " head))
+        (doseq [line tail] (println line)))
+      (println))))
+
 (defn- usage []
-  (println "Usage: plurama-cli <app> <path> [options]")
-  (println "       plurama-cli apps")
+  (println (str "Usage: " tool-name " <app> <path> [options]"))
+  (println (str "       " tool-name " apps"))
   (println)
   (println "Curl-like client for the plurama apps. Credentials are baked in at install time.")
   (println)
@@ -158,20 +211,13 @@
   ;; Listed from the baked credentials rather than hardcoded, so a target added
   ;; by the deploy script shows up here without this text going stale.
   (println "Configured apps:")
-  (if-let [apps (seq (sort (map name (keys @credentials))))]
-    (println "  " (str/join ", " apps))
-    (println "   (none — no baked credentials and no credentials.edn)"))
-  (println "  Run 'plurama-cli apps' for each one's endpoint and identity.")
-  (println)
-  (println "Examples:")
-  (println "  plurama-cli treina /describe")
-  (println "  plurama-cli treina '/trainings/?search=squat'")
-  (println "  plurama-cli treina /trainings/ -X POST --body '{\"name\":\"Squat\"}'")
-  (println "  plurama-cli tracker /today-board")
-  (println "  plurama-cli rhizome '/contexts?q=Books'")
-  (println "  plurama-cli tracker-just-msg /messages \\")
-  (println "    --body '{\"sender\":\"Plurama Development Coordinator\",\"title\":\"...\"}'")
-  (println)
+  (let [apps (sort (map name (keys @credentials)))]
+    (if (seq apps)
+      (println "  " (str/join ", " apps))
+      (println "   (none — no baked credentials and no credentials.edn)"))
+    (println (str "  Run '" tool-name " apps' for each one's endpoint and identity."))
+    (println)
+    (print-examples (set apps)))
   (println "Paths are relative to /api, where every plurama app serves its API;")
   (println "a path that already starts with /api is passed through unchanged.")
   (println)
@@ -213,7 +259,10 @@
       (try
         (System/exit (run app path opts))
         (catch Exception e
-          (binding [*out* *err*] (println "plurama-cli:" (ex-message e)))
+          ;; `tool-name`, not a literal: this line is what a sandboxed agent
+          ;; sees when it names an app its build does not carry, and telling it
+          ;; `plurama-cli:` would name a binary it has not got.
+          (binding [*out* *err*] (println (str tool-name ":") (ex-message e)))
           (System/exit 2))))))
 
 (when (= *file* (System/getProperty "babashka.file"))
