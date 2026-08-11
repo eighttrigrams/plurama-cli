@@ -71,22 +71,43 @@
   to do -- consult and add to the memory store, and post one inbox message per
   finished task -- so it should not break a workflow that was already sanctioned.
   Widen it here, deliberately, rather than reaching for the full binary."
-  {:cookbook         [[:get  #"/api(/.*)?"]
-                      [:post #"/api/recipes"]]
-   :tracker-just-msg [[:post #"/api/messages"]]
-   ;; personalist is not among the proxy's targets today, so this is inert — an
-   ;; app the credential file does not name is a 404 before the allowlist is
-   ;; consulted at all. It is here because it is the rule the token path was
-   ;; tested with, and because /api/me is the cheapest possible first grant if
-   ;; personalist is ever handed to a sandbox: it names the machine user and
-   ;; reads nothing else.
-   :personalist      [[:get  #"/api/me"]]})
+  {})
+
+(def ^:private default-policy
+  "What an app with no rule of its own gets, and today that is everything.
+
+  This proxy exists to keep credentials out of the sandbox, not to narrow what
+  the sandbox may do. Those are separable, and only the first one is being asked
+  for: an agent in the box gets whatever the credential itself gets, with the
+  apps' own gates — tracker's recording gate, cookbook's publish latch — doing
+  the deciding, exactly as they did when the passwords were baked in. What
+  changed is that a password can no longer be read, copied out, or used after the
+  container is gone.
+
+  **And the decisive reason is maintenance, not philosophy.** A per-path rule set
+  here is a second copy of each app's route list, kept in a different repo from
+  the routes themselves. It cannot be kept in step: an app adds an endpoint and
+  this file does not fail, it quietly refuses the new one — the same failure mode
+  prober's README describes for enumerating the shapes of secrets.yaml. A list
+  that goes stale silently is worse than no list, because it reads like policy
+  while behaving like rot.
+
+  Set to `:all` deliberately rather than by leaving the map empty and calling it
+  a default, so that adding a target to `proxy-credentials.edn` does not silently
+  refuse every call to it. `allowlist` above stays in place because tightening one
+  app later is then a single entry — e.g. `{:tracker-just-msg [[:post
+  #\"/api/messages\"]]}` — and that is worth having for a target that genuinely
+  deserves a local limit, where a short, stable rule beats mirroring a whole API."
+  :all)
 
 (defn- allowed? [app method path]
-  (boolean
-   (some (fn [[m pattern]]
-           (and (= m method) (re-matches pattern path)))
-         (get allowlist app))))
+  (let [rules (get allowlist app default-policy)]
+    (if (= :all rules)
+      true
+      (boolean
+       (some (fn [[m pattern]]
+               (and (= m method) (re-matches pattern path)))
+             rules)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Upstream tokens. Same login dance plurama_cli.clj does, kept in memory
@@ -215,11 +236,11 @@
     (log! "plurama-cli-proxy listening on" port)
     (log! "targets:" (str/join ", " apps))
     (doseq [app apps
-            :let [rules (get allowlist (keyword app))]]
-      (log! " " app (if (seq rules)
+            :let [rules (get allowlist (keyword app) default-policy)]]
+      (log! " " app (if (= :all rules)
+                      "any method, any path -- the app's own gates decide"
                       (str/join "; " (for [[m p] rules]
-                                       (str (str/upper-case (name m)) " " p)))
-                      "(nothing allowed -- no rules)")))
+                                       (str (str/upper-case (name m)) " " p))))))
     (srv/run-server handle {:port port :ip "0.0.0.0"})
     @(promise)))
 
