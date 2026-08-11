@@ -73,7 +73,14 @@
   Widen it here, deliberately, rather than reaching for the full binary."
   {:cookbook         [[:get  #"/api(/.*)?"]
                       [:post #"/api/recipes"]]
-   :tracker-just-msg [[:post #"/api/messages"]]})
+   :tracker-just-msg [[:post #"/api/messages"]]
+   ;; personalist is not among the proxy's targets today, so this is inert — an
+   ;; app the credential file does not name is a 404 before the allowlist is
+   ;; consulted at all. It is here because it is the rule the token path was
+   ;; tested with, and because /api/me is the cheapest possible first grant if
+   ;; personalist is ever handed to a sandbox: it names the machine user and
+   ;; reads nothing else.
+   :personalist      [[:get  #"/api/me"]]})
 
 (defn- allowed? [app method path]
   (boolean
@@ -168,11 +175,26 @@
                  ;; already-consumed body and silently POST nothing.
                  :body (when body (slurp body))
                  :content-type (get headers "content-type")}
-            auth? (some? (:username cfg))]
+            ;; Two upstream credential kinds, the same two plurama_cli.clj
+            ;; carries. `:token` is an opaque machine token (personalist's
+            ;; `pmu_…`) used verbatim — there is no login route to call and
+            ;; nothing to mint. `:username`/`:password` is the login path.
+            ;;
+            ;; The token is checked FIRST and its presence suppresses the login
+            ;; entirely, because a machine user has both keys: personalist's
+            ;; entry carries `:username "daniel-machine"` for the listing as well
+            ;; as its `:token`. Keying off the username alone would post a login
+            ;; with a nil password and fail with the working credential sitting
+            ;; unused in the same map.
+            ;;
+            ;; No 401 retry for a token, deliberately — rotation is revocation
+            ;; for these, so there is no second thing to try.
+            static-token (:token cfg)
+            login-auth? (and (nil? static-token) (some? (:username cfg)))]
         (try
-          (let [token (when auth? (token-for app cfg))
+          (let [token (or static-token (when login-auth? (token-for app cfg)))
                 resp (let [r (forward cfg token req)]
-                       (if (and auth? (= 401 (:status r)))
+                       (if (and login-auth? (= 401 (:status r)))
                          ;; Cached token went stale (restarted app, rotated
                          ;; password). Mint once and retry; a second 401 is the
                          ;; caller's answer.
