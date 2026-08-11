@@ -204,6 +204,9 @@
    ["tracker"          ["tracker /today-board"]]
    ["rhizome"          ["rhizome '/contexts?q=Books'"]]
    ["cookbook"         ["cookbook '/recipes?search=docker'"]]
+   ;; /me is the cheapest proof the baked machine token is still the live one:
+   ;; 200 names the machine user, 401 means it was rotated out from under us.
+   ["personalist"      ["personalist /me"]]
    ["tracker-just-msg" ["tracker-just-msg /messages \\"
                         "    --body '{\"sender\":\"Plurama Development Coordinator\",\"title\":\"...\"}'"]]])
 
@@ -251,7 +254,15 @@
 (defn- list-apps []
   (doseq [[app cfg] (sort-by key @credentials)]
     (println (format "%-18s %-40s %s" (name app) (str (:base-url cfg) "/api")
-                     (or (:username cfg) "(no auth)")))))
+                     ;; The identity column names the auth kind as well as the
+                     ;; identity, because "(no auth)" here is load-bearing: it is
+                     ;; how the proxy build is checked to carry no credentials,
+                     ;; and a machine token silently reading like a login would
+                     ;; blunt that.
+                     (cond
+                       (:token cfg)    (str (or (:username cfg) "machine") " (token)")
+                       (:username cfg) (:username cfg)
+                       :else           "(no auth)")))))
 
 (defn- run [app path opts]
   (let [cfg (app-config app)
@@ -261,10 +272,26 @@
              :path path
              :body body
              :headers (parse-headers (:header opts))}
-        auth? (some? (:username cfg))
-        token (when auth? (or (cached-token app) (login! app cfg)))
+        ;; Two credential kinds reach the same Authorization: Bearer header.
+        ;;
+        ;; `:token` is an opaque machine token baked in whole -- personalist's
+        ;; `pmu_...`, minted once in its UI and only ever stored as a SHA-256
+        ;; hash, so there is nothing to log in with and nothing to cache. It is
+        ;; used verbatim.
+        ;;
+        ;; `:username`/`:password` is the older path: POST /api/auth/login for a
+        ;; short-lived JWT, cached on disk, re-minted on a 401.
+        ;;
+        ;; A static token gets no 401 retry, deliberately. There is no second
+        ;; thing to try -- rotation is revocation for these, so a 401 means the
+        ;; token was replaced and the baked one is dead. Retrying would just ask
+        ;; twice and report the same failure a beat later.
+        static-token (:token cfg)
+        login-auth? (and (nil? static-token) (some? (:username cfg)))
+        token (or static-token
+                  (when login-auth? (or (cached-token app) (login! app cfg))))
         resp (let [r (send-request cfg token req)]
-               (if (and auth? (= 401 (:status r)))
+               (if (and login-auth? (= 401 (:status r)))
                  (send-request cfg (login! app cfg) req)
                  r))]
     (print-response resp opts)
