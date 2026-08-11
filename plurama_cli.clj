@@ -51,7 +51,30 @@
     (let [uri (java.net.URI. url)
           port (.getPort uri)]
       (System/setProperty (str scheme ".proxyHost") (.getHost uri))
-      (System/setProperty (str scheme ".proxyPort") (str (if (pos? port) port 80))))))
+      (System/setProperty (str scheme ".proxyPort") (str (if (pos? port) port 80)))))
+  ;; NO_PROXY, in the form the JDK wants. Setting proxyHost alone routes
+  ;; *everything* through the egress proxy, including sidecars on the box's own
+  ;; compose network -- which tinyproxy then refuses, since its filter names
+  ;; public hosts and nothing internal. That is how the credential proxy gets
+  ;; locked out of a locked box: it lives at http://plurama-proxy:8899, on the
+  ;; internal network, and every call to it dies in the egress filter.
+  ;;
+  ;; curl honours NO_PROXY natively; the JDK does not read the env var at all,
+  ;; only `nonProxyHosts`, pipe-separated with `*` wildcards. `.foo` is the
+  ;; env-var idiom for a domain suffix and becomes `*.foo`.
+  ;;
+  ;; Both keys are set because HTTPS is the ambiguous one: the JDK's default
+  ;; ProxySelector is documented to fold https onto `http.nonProxyHosts`, and
+  ;; writing the https key too costs nothing if it is indeed never read.
+  (when-let [no-proxy (System/getenv "NO_PROXY")]
+    (let [hosts (->> (str/split no-proxy #",")
+                     (map str/trim)
+                     (remove str/blank?)
+                     (map #(if (str/starts-with? % ".") (str "*" %) %)))]
+      (when (seq hosts)
+        (let [spec (str/join "|" hosts)]
+          (System/setProperty "http.nonProxyHosts" spec)
+          (System/setProperty "https.nonProxyHosts" spec))))))
 
 (def ^:private credentials-file
   (io/file (System/getProperty "user.home") ".config" "plurama-cli" "credentials.edn"))
