@@ -1,0 +1,18 @@
+;; Two things live here, and neither of them is a build.
+;;
+;; `:paths` is what makes `cookbook_seal.clj` requirable from a checkout, so that
+;; the envelope is one file rather than one copy inside `plurama_cli.clj` and a
+;; second inside `cookbook_tui.clj`. The installed binaries are baked by the
+;; private deploy script, which already concatenates namespaces into one file for
+;; `us-vs-them`; it has to do the same here, and babashka says so loudly rather
+;; than quietly if it does not.
+;;
+;; `test` is the drift control. It reads the shared vector file out of the
+;; cookbook checkout beside this one — the same sibling-checkout idiom cookbook's
+;; own deps.edn uses for us-vs-them — and refuses to pass without it.
+{:paths ["." "test"]
+ :tasks {test {:doc "Run the seal suite against the shared test vectors."
+               :requires ([clojure.test :as t])
+               :task (do (require 'cookbook-seal-test)
+                         (let [{:keys [fail error]} (t/run-tests 'cookbook-seal-test)]
+                           (System/exit (if (zero? (+ fail error)) 0 1))))}}}

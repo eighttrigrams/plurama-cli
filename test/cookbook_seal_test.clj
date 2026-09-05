@@ -1,0 +1,266 @@
+(ns cookbook-seal-test
+  "The Clojure half of the drift control.
+
+  Everything textual in here comes out of
+  `cookbook/test/fixtures/seal-vectors.edn`, which cookbook's ClojureScript suite
+  reads as well. Nothing in this file invents a ciphertext: if the two suites
+  ever disagree about the envelope, one of them goes red here."
+  (:require [clojure.test :refer [deftest is testing]]
+            [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [cookbook-seal :as seal]))
+
+(def ^:private vectors-path
+  "The fixture lives in cookbook, because the columns it names are cookbook's.
+  This repo reaches it as a sibling checkout — the idiom cookbook's own deps.edn
+  already uses for us-vs-them — or wherever COOKBOOK_SEAL_VECTORS says.
+
+  **Missing is a failure, not a skip.** A fixture whose absence turns the suite
+  green would be worse than no fixture: it would report agreement it never
+  checked."
+  (or (System/getenv "COOKBOOK_SEAL_VECTORS")
+      "../cookbook/test/fixtures/seal-vectors.edn"))
+
+(def ^:private fixture
+  (delay
+    (let [f (io/file vectors-path)]
+      (when-not (.exists f)
+        (throw (ex-info (str "no seal vectors at " (.getAbsolutePath f)
+                             " — check out cookbook beside this repo, or set "
+                             "COOKBOOK_SEAL_VECTORS")
+                        {:path (.getAbsolutePath f)})))
+      (edn/read-string (slurp f)))))
+
+(defn- test-key [] (seal/key-from-base64 (:key-base64 @fixture)))
+
+(defn- b64-decode [s] (.decode (java.util.Base64/getDecoder) ^String s))
+
+(deftest the-fixture-describes-the-envelope-this-file-implements
+  (let [{:keys [prefix nonce-bytes tag-bits key-bytes]} (:envelope @fixture)]
+    (is (= prefix seal/envelope-prefix))
+    (is (= 12 nonce-bytes))
+    (is (= 128 tag-bits))
+    (is (= 32 key-bytes))
+    (is (= 32 (count (b64-decode (:key-base64 @fixture)))))))
+
+(deftest every-vector-seals-to-exactly-the-recorded-ciphertext
+  (let [k (test-key)]
+    (doseq [{:keys [name aad nonce plaintext sealed]} (:vectors @fixture)]
+      (testing name
+        (is (= sealed (seal/seal-text k aad plaintext (b64-decode nonce)))
+            "same key, same nonce, same AAD must give the same envelope")))))
+
+(deftest every-vector-unseals-back-to-its-plaintext
+  (let [k (test-key)]
+    (doseq [{:keys [name aad plaintext sealed]} (:vectors @fixture)]
+      (testing name
+        (is (= plaintext (seal/unseal-text k aad sealed)))))))
+
+(deftest the-column-api-agrees-with-the-raw-one
+  (let [k (test-key)]
+    (doseq [{:keys [name table column plaintext sealed]} (:vectors @fixture)]
+      (testing name
+        (is (= plaintext (seal/unseal k table column sealed))
+            "unseal derives the AAD from the column it was handed")))))
+
+(deftest blank-is-never-sealed
+  (let [k (test-key)]
+    (testing "nil stays nil — 'not recorded' is not 'recorded, and nothing'"
+      (is (nil? (seal/seal k :recipes :reason nil))))
+    (doseq [blank (:blank @fixture)]
+      (testing (pr-str blank)
+        (is (= blank (seal/seal k :recipes :description blank))
+            "byte-identical, not normalised")))))
+
+(deftest unseal-passes-through-anything-without-the-prefix
+  (let [k (test-key)]
+    (testing "nil"
+      (is (nil? (seal/unseal k :recipes :description nil))))
+    (doseq [v (:passthrough @fixture)]
+      (testing (pr-str v)
+        (is (= v (seal/unseal k :recipes :description v)))
+        (is (false? (seal/sealed? v)))))))
+
+(deftest a-tampered-envelope-fails-to-open
+  (doseq [{:keys [name aad sealed key-base64]} (:tamper @fixture)]
+    (testing name
+      (is (thrown? Exception
+                   (seal/unseal-text (seal/key-from-base64 key-base64) aad sealed))))))
+
+(deftest a-round-trip-holds-for-a-fresh-nonce
+  (let [k (test-key)]
+    (doseq [plaintext (:round-trip @fixture)]
+      (testing (pr-str plaintext)
+        (let [sealed (seal/seal-text k (seal/aad :recipes :description) plaintext)]
+          (is (seal/sealed? sealed))
+          (is (= plaintext (seal/unseal-text k (seal/aad :recipes :description) sealed))))))))
+
+(deftest the-same-sentence-seals-differently-every-time
+  (let [k (test-key)
+        text "Two Recipes may legitimately say the same thing."]
+    (is (not= (seal/seal k :recipes :description text)
+              (seal/seal k :recipes :description text))
+        "a fresh nonce per value is what stops equality leaking")))
+
+(deftest an-unchanged-value-is-not-re-sealed
+  (testing "the rule that keeps content-would-change? working, server-side and untouched"
+    (let [k (test-key)
+          stored (seal/seal k :recipes :description "The text as it stands.")]
+      (is (= stored (seal/seal k :recipes :description "The text as it stands." stored))
+          "byte-identical echo, so the server's equality still sees a no-op")
+      (is (not= stored (seal/seal k :recipes :description "Something else." stored))
+          "a genuine change gets a fresh nonce")
+      (is (= "The text as it stands."
+             (seal/unseal k :recipes :description
+                          (seal/seal k :recipes :description "The text as it stands." stored)))))))
+
+(deftest an-unopenable-stored-value-does-not-block-the-write
+  (let [k (test-key)
+        other (seal/key-from-base64 (:other-key-base64 @fixture))
+        stored (seal/seal other :recipes :description "Sealed under a key we do not hold.")
+        out (seal/seal k :recipes :description "The new text." stored)]
+    (is (not= stored out))
+    (is (= "The new text." (seal/unseal k :recipes :description out)))))
+
+(deftest a-stored-plaintext-echoes-nothing-and-seals-cleanly
+  (testing "the half-migrated shelf: the column holds plain text, not an envelope"
+    (let [k (test-key)
+          out (seal/seal k :recipes :description "unchanged since before the migration"
+                         "unchanged since before the migration")]
+      (is (seal/sealed? out) "there is no stored ciphertext to echo, so it seals")
+      (is (= "unchanged since before the migration"
+             (seal/unseal k :recipes :description out))))))
+
+(deftest no-key-means-no-sealing
+  (testing "cookbook's behaviour before any of this existed, reachable by config"
+    (is (= "plain" (seal/seal nil :recipes :description "plain")))
+    (is (= "enc:v1:whatever" (seal/unseal nil :recipes :description "enc:v1:whatever")))
+    (is (= {:description "plain"} (seal/seal-row nil :recipes {:description "plain"})))
+    (is (= [{:version 1 :description "plain"}]
+           (seal/unseal-body nil [{:version 1 :description "plain"}])))))
+
+;; ---------------------------------------------------------------------------
+;; The inventory and the shapes.
+
+(deftest the-inventory-is-thirteen-columns
+  (is (= 13 (reduce + (map count (vals seal/sealed-columns)))))
+  (is (= {:recipes [:description :useful_when :reason :context]
+          :recipe_history [:description :useful_when :reason :context]
+          :recipe_proposals [:description :useful_when :reason :context]
+          :scopes [:description]}
+         seal/sealed-columns))
+  (testing "title and tags are the search surface and are never in it"
+    (doseq [[_ columns] seal/sealed-columns]
+      (is (not-any? #{:title :tags} columns)))))
+
+(deftest a-lean-row-gains-no-keys
+  (testing "cookbook's listing carries no description at all, and must not grow one"
+    (let [k (test-key)
+          lean {:id 1 :version 2 :title "T" :useful_when "U"}]
+      (is (= lean (dissoc (seal/unseal-recipe k (assoc lean :useful_when
+                                                       (seal/seal k :recipes :useful_when "U")))
+                          :nothing)))
+      (is (not (contains? (seal/unseal-recipe k lean) :description))))))
+
+(deftest a-version-list-unseals-against-two-tables
+  (let [k (test-key)
+        body {:total 2
+              :versions [{:version 2 :current true
+                          :description (seal/seal k :recipes :description "now")
+                          :reason (seal/seal k :recipes :reason "because")}
+                         {:version 1
+                          :description (seal/seal k :recipe_history :description "before")
+                          :reason nil}]}
+        out (seal/unseal-versions k body)]
+    (is (= "now" (get-in out [:versions 0 :description])))
+    (is (= "because" (get-in out [:versions 0 :reason])))
+    (is (= "before" (get-in out [:versions 1 :description])))
+    (is (nil? (get-in out [:versions 1 :reason])))
+    (testing "the current entry really is bound to recipes, not to recipe_history"
+      (is (thrown? Exception
+                   (seal/unseal-text k (seal/aad :recipe_history :description)
+                                     (get-in body [:versions 0 :description])))))))
+
+(deftest an-inbox-entry-carries-both-texts-and-they-come-from-different-tables
+  (let [k (test-key)
+        entry {:id 9 :kind "proposed" :recipe_title "A title, in the clear"
+               :scopes [{:id 3 :title "sandboxing"
+                         :description (seal/seal k :scopes :description "safe agentic coding")}]
+               :proposal {:title "A title, in the clear"
+                          :description (seal/seal k :recipe_proposals :description "what the agent wants")
+                          :reason (seal/seal k :recipe_proposals :reason "the example went stale")
+                          :current_description (seal/seal k :recipes :description "what it says now")
+                          :current_useful_when (seal/seal k :recipes :useful_when "when you need it")}}
+        out (seal/unseal-inbox-entry k entry)]
+    (is (= "what the agent wants" (get-in out [:proposal :description])))
+    (is (= "the example went stale" (get-in out [:proposal :reason])))
+    (is (= "what it says now" (get-in out [:proposal :current_description])))
+    (is (= "when you need it" (get-in out [:proposal :current_useful_when])))
+    (is (= "safe agentic coding" (get-in out [:scopes 0 :description])))
+    (is (= "A title, in the clear" (:recipe_title out)))))
+
+(deftest unseal-body-recognises-the-shapes-the-api-answers-with
+  (let [k (test-key)
+        d #(seal/seal k :recipes :description %)]
+    (testing "a single Recipe, from a read, a create, a save or a publish"
+      (is (= "body" (:description (seal/unseal-body k {:id 1 :version 3 :description (d "body")})))))
+    (testing "a listing"
+      (is (= ["a" "b"] (mapv :description
+                             (seal/unseal-body k [{:id 1 :version 1 :description (d "a")}
+                                                  {:id 2 :version 1 :description (d "b")}])))))
+    (testing "the Scopes listing, which carries no version"
+      (is (= ["coding with AI"]
+             (mapv :description
+                   (seal/unseal-body k [{:id 1 :title "agentic engineering"
+                                         :description (seal/seal k :scopes :description "coding with AI")}])))))
+    (testing "the 409 that says the Recipe moved"
+      (is (= "current text"
+             (get-in (seal/unseal-body k {:error "Recipe was modified elsewhere"
+                                          :reason "modified-elsewhere"
+                                          :current {:id 1 :version 4 :description (d "current text")}})
+                     [:current :description]))))
+    (testing "the 409 that says a proposal is pending"
+      (is (= "queued text"
+             (get-in (seal/unseal-body k {:error "..." :reason "proposal-pending"
+                                          :pending {:base_version 2
+                                                    :description (seal/seal k :recipe_proposals :description "queued text")}})
+                     [:pending :description]))))
+    (testing "the 202 that says one was just filed"
+      (let [out (seal/unseal-body k {:pending {:description (seal/seal k :recipe_proposals :description "filed")}
+                                     :recipe {:id 1 :version 2 :description (d "unchanged")}})]
+        (is (= "filed" (get-in out [:pending :description])))
+        (is (= "unchanged" (get-in out [:recipe :description])))))
+    (testing "a body with no prose in it at all is handed back as it came"
+      (is (= {:success true} (seal/unseal-body k {:success true})))
+      (is (= {:error "Recipe not found"} (seal/unseal-body k {:error "Recipe not found"}))))))
+
+(deftest a-recipe-write-seals-the-prose-and-nothing-else
+  (let [k (test-key)
+        stored {:description (seal/seal k :recipes :description "the body as stored")
+                :useful_when (seal/seal k :recipes :useful_when "unchanged")}
+        body {:title "A title"
+              :tags "one two three"
+              :scope_ids [1 2]
+              :modified_at "2026-09-05 10:00:00"
+              :useful_when "unchanged"
+              :description "the body, edited"
+              :reason "because it was wrong"
+              :context "steps 1-4"}
+        out (seal/seal-recipe-write k body stored)]
+    (is (= "A title" (:title out)) "the title is the search surface")
+    (is (= "one two three" (:tags out)))
+    (is (= [1 2] (:scope_ids out)))
+    (is (= "2026-09-05 10:00:00" (:modified_at out)))
+    (is (= (:useful_when stored) (:useful_when out))
+        "unchanged, so the stored ciphertext is echoed and the server sees a no-op")
+    (is (seal/sealed? (:description out)))
+    (is (not= (:description stored) (:description out)))
+    (is (= "the body, edited" (seal/unseal k :recipes :description (:description out))))
+    (is (= "because it was wrong" (seal/unseal k :recipes :reason (:reason out))))
+    (is (= "steps 1-4" (seal/unseal k :recipes :context (:context out))))))
+
+(deftest a-partial-write-seals-only-what-it-carries
+  (testing "an omitted field keeps its value, server-side; the seal must not send one"
+    (let [k (test-key)
+          out (seal/seal-recipe-write k {:scope_ids [3] :modified_at "…"})]
+      (is (= {:scope_ids [3] :modified_at "…"} out)))))
