@@ -273,7 +273,14 @@
 
   The body is re-serialised rather than passed through, so `--raw` prints the
   same JSON with possibly a different key order. `--raw` means *do not
-  pretty-print*; it has never meant *do not decrypt*."
+  pretty-print*; it has never meant *do not decrypt*.
+
+  The catch is for a body that says it is JSON and is not. It is **not** what
+  handles a value that will not open: `seal/unseal` hands those back as they
+  are, so one unreadable column shows as `enc:v1:…` beside everything that
+  reads. A catch that swallowed decryption failures here would return the whole
+  response still sealed and say nothing about why — which is precisely what it
+  did during development, and it cost an afternoon."
   [resp]
   (let [k @seal-key]
     (if-not (and k (json-response? resp) (seq (:body resp)))
@@ -374,10 +381,16 @@
   ;; this — so this is a fact and not a warning.
   (when (:cookbook @credentials)
     (println)
-    (if-let [source (seal/key-source)]
-      (println (str "cookbook prose sealing: on, key from " source))
-      (println (str "cookbook prose sealing: off — no key. Set COOKBOOK_SEAL_KEY, or put one at "
-                    seal/key-file)))))
+    ;; The try is so a misconfigured key file does not cost the reader the app
+    ;; table above it. It still says what is wrong, on the line whose whole job
+    ;; is to say what is true about sealing.
+    (try
+      (if-let [source (seal/key-source)]
+        (println (str "cookbook prose sealing: on, key from " source))
+        (println (str "cookbook prose sealing: off — no key. Set COOKBOOK_SEAL_KEY, or put one at "
+                      seal/key-file)))
+      (catch Exception e
+        (println (str "cookbook prose sealing: misconfigured — " (ex-message e)))))))
 
 (defn- run [app path opts]
   (let [cfg (app-config app)

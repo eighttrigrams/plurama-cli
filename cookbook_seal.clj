@@ -235,13 +235,21 @@
 
 (defn unseal
   "Read one value out of one column. Prefix-driven: anything without `enc:v1:`
-  comes back exactly as it went in, and so does everything when there is no key —
-  which is what a client without the key sees of a sealed shelf, ciphertext and
-  all. That is the honest answer: it cannot read this, and pretending otherwise
-  would mean inventing text."
+  comes back exactly as it went in, and so does everything when there is no key.
+
+  **A value that will not open comes back as it is**, ciphertext and all, rather
+  than throwing. That is the honest answer — this client cannot read this, and
+  inventing text or a blank would be worse — and it is the diagnosable one: one
+  unreadable value shows as `enc:v1:…` beside everything that reads, instead of a
+  single failure somewhere in a listing taking the whole response down with it.
+  The first end-to-end run of this code lost a whole version ladder that way and
+  said nothing about why.
+
+  The browser half does the same, deliberately, for the same reason."
   [k table column v]
   (if (and k (sealed? v))
-    (unseal-text k (aad table column) v)
+    (try (unseal-text k (aad table column) v)
+         (catch Exception _ v))
     v))
 
 (defn seal
@@ -276,43 +284,69 @@
   beside it."
   (java.io.File. (System/getProperty "user.home") ".config/plurama-cli/cookbook-seal.key"))
 
+(defn- key-location
+  "Where the key would come from — `[:env NAME]`, `[:file PATH]`, or `nil` for
+  none. Resolved in **one** place, because `load-key` and `key-source` must not
+  be able to disagree about whether sealing is on, and once they did: a
+  `COOKBOOK_SEAL_KEY_FILE` naming a file that was not there left `load-key`
+  answering `nil` while `apps` reported *sealing: on*. That is precisely the
+  shape of lie the `apps` line exists to prevent.
+
+  Three places, in order:
+
+  - `COOKBOOK_SEAL_KEY` — base64. The shape a `sops exec-env` wrapper hands it
+    over in on the owner's laptop, where the key lives in `secrets.yaml`.
+  - `COOKBOOK_SEAL_KEY_FILE` — a path to read it from.
+  - `~/.config/plurama-cli/cookbook-seal.key` — the default file, which is the
+    shape a devbox gets it in: a mounted file, the same pattern as
+    `docker/cookbook_creds`.
+
+  **A file somebody named and did not put there throws.** It is a mistake, not a
+  request for plaintext — the same judgement a malformed key gets. The *default*
+  file's absence is not: nothing named it, so nothing is missing, and sealing is
+  simply off."
+  []
+  (let [from-env (System/getenv "COOKBOOK_SEAL_KEY")
+        named (System/getenv "COOKBOOK_SEAL_KEY_FILE")]
+    (cond
+      (not (str/blank? from-env)) [:env "COOKBOOK_SEAL_KEY"]
+
+      (not (str/blank? named))
+      (if (.exists (java.io.File. ^String named))
+        [:file named]
+        (throw (ex-info (str "COOKBOOK_SEAL_KEY_FILE names " named
+                             ", which is not there — cookbook prose would be "
+                             "written in the clear")
+                        {:path named})))
+
+      (.exists key-file) [:file (str key-file)])))
+
 (defn load-key
   "The key, or `nil` — and `nil` means **sealing is off**, which is cookbook's
   behaviour before any of this existed and is what every function above already
   understands. That is deliberate: it keeps the whole thing reversible until the
   data is migrated, and it lets both worlds be exercised.
 
-  Three places, in order:
-
-  - `COOKBOOK_SEAL_KEY` — base64. This is the shape a `sops exec-env` wrapper
-    hands it over in on the owner's laptop, where the key lives in
-    `secrets.yaml`.
-  - `COOKBOOK_SEAL_KEY_FILE` — a path to read it from.
-  - `~/.config/plurama-cli/cookbook-seal.key` — the default file, which is the
-    shape a devbox gets it in: a mounted file, the same pattern as
-    `docker/cookbook_creds`.
-
   A key that is present but malformed **throws**. Falling back to 'sealing off'
   there would be the worst of both: an agent writing plaintext into a sealed
   shelf, and nothing saying so."
   []
-  (let [from-env (System/getenv "COOKBOOK_SEAL_KEY")
-        path (System/getenv "COOKBOOK_SEAL_KEY_FILE")
-        file (if path (java.io.File. ^String path) key-file)]
-    (cond
-      (not (str/blank? from-env)) (key-from-base64 from-env)
-      (.exists file) (key-from-base64 (slurp file))
-      :else nil)))
+  (when-let [[kind where] (key-location)]
+    (key-from-base64 (case kind
+                       :env (System/getenv where)
+                       :file (slurp where)))))
 
 (defn key-source
-  "Where `load-key` would find one, in words, for the places this is reported.
-  Never the key itself."
+  "Where `load-key` would find a **usable** key, in words, for the places this is
+  reported. Never the key itself.
+
+  It loads the key rather than only locating it, because *on* is read as a
+  promise that prose will be sealed, and a five-byte string in
+  `COOKBOOK_SEAL_KEY` locates perfectly and opens nothing. A malformed key
+  throws out of here, which is the answer the caller wants: it is the same
+  refusal every other cookbook call is about to give."
   []
-  (cond
-    (not (str/blank? (System/getenv "COOKBOOK_SEAL_KEY"))) "COOKBOOK_SEAL_KEY"
-    (System/getenv "COOKBOOK_SEAL_KEY_FILE") (System/getenv "COOKBOOK_SEAL_KEY_FILE")
-    (.exists key-file) (str key-file)
-    :else nil))
+  (when (load-key) (second (key-location))))
 
 ;; ---------------------------------------------------------------------------
 ;; The inventory.

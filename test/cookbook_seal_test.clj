@@ -106,6 +106,18 @@
       (is (thrown? Exception
                    (seal/unseal-text (seal/key-from-base64 key-base64) aad sealed))))))
 
+(deftest unseal-of-a-value-that-will-not-open-hands-it-back
+  (testing "a wrong key must not take a whole response down; it must be visibly unreadable"
+    (let [k (seal/key-from-base64 (:other-key-base64 @fixture))
+          {:keys [sealed table column]} (first (:vectors @fixture))]
+      (is (= sealed (seal/unseal k table column sealed)))
+      (testing "and a whole body is unsealed as far as it can be, not abandoned"
+        (let [readable (seal/seal k :recipes :useful_when "this one opens")
+              out (seal/unseal-body k {:id 1 :version 2 :description sealed
+                                       :useful_when readable})]
+          (is (= sealed (:description out)))
+          (is (= "this one opens" (:useful_when out))))))))
+
 (deftest a-round-trip-holds-for-a-fresh-nonce
   (let [k (test-key)]
     (doseq [plaintext (:round-trip @fixture)]
