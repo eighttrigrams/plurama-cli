@@ -6,7 +6,8 @@
             [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [cookbook-seal :as seal]))
 
 (def ^:private baked-credentials
   "Base64-encoded EDN, substituted at install time by the private
@@ -177,6 +178,109 @@
       (println (json/generate-string (json/parse-string body) {:pretty true}))
       (when (seq body) (println body)))))
 
+;; ---------------------------------------------------------------------------
+;; Cookbook's prose is sealed in the clients.
+;;
+;; Cookbook is served from fly and the key is never sent there, so there is no
+;; trusted middle process to seal in: the browser does it on WebCrypto and this
+;; does it on javax.crypto. Both use the one envelope in `cookbook_seal.clj`, and
+;; a fixture in the cookbook repo pins it so the two cannot drift.
+;;
+;; That makes this program the reading and writing surface for **agents**. Note
+;; the two credentials are different things: the machine token says who may
+;; *write*, and the key says who may *read prose*. An agent with a token and no
+;; key can fill the shelf and cannot read a word of what is on it.
+;;
+;; With no key configured nothing here does anything at all — see
+;; `cookbook-seal/load-key`.
+
+(def ^:private seal-key
+  "Read once, and lazily: a run that never touches cookbook has no business
+  failing on a malformed key file, and a run that does has every business
+  failing on it."
+  (delay (seal/load-key)))
+
+(defn- cookbook? [app] (= "cookbook" app))
+
+(defn- write-target
+  "Which table a cookbook write is aimed at, and at which row — `nil` for
+  everything else, which is most of the API. `/recipes/7/publish` is deliberately
+  not matched: it carries no body, and after step 6 it is an unseal rather than a
+  seal."
+  [path]
+  (let [p (-> path (str/split #"\?") first (str/replace #"/$" ""))
+        id #(parse-long (last (str/split % #"/")))]
+    (cond
+      (= p "/api/recipes") {:table :recipes}
+      (= p "/api/scopes")  {:table :scopes}
+      (re-matches #"/api/recipes/\d+" p) {:table :recipes :id (id p)}
+      (re-matches #"/api/scopes/\d+" p)  {:table :scopes  :id (id p)})))
+
+(defn- stored-columns
+  "What that row's sealed columns hold **right now**, so a value the caller did
+  not change can be written back as the very ciphertext already stored. Without
+  it, a fresh nonce makes every resend look like a change to the server, and an
+  agent that PUTs the same text twice piles up versions, history rows and inbox
+  entries — corrupting the ladder the seal exists to protect.
+
+  A Recipe's is read from `/versions` and **not** from `?detail=full`, which is
+  the whole reason this is reachable at all: a full read counts as a consumption
+  and ranks the shelf, so seal bookkeeping would quietly reorder the owner's
+  Cookbook. `/versions` carries all four columns of the current row and counts
+  nothing.
+
+  Anything that goes wrong here — a 404, a 401, a body that will not parse —
+  yields `nil`, which means *nothing to echo* and a fresh seal. That is the safe
+  direction: a redundant version is a wart, and a refused write is a lost one."
+  [cfg token {:keys [table id]}]
+  (when id
+    (try
+      (let [path (case table
+                   :recipes (str "/api/recipes/" id "/versions")
+                   :scopes "/api/scopes")
+            resp (send-request cfg token {:method :get :path path :headers {}})]
+        (when (= 200 (:status resp))
+          (let [parsed (json/parse-string (:body resp) true)]
+            (case table
+              :recipes (some-> (->> parsed :versions (filter :current) first)
+                               (select-keys [:description :useful_when :reason :context]))
+              :scopes (some-> (->> parsed (filter #(= id (:id %))) first)
+                              (select-keys [:description]))))))
+      (catch Exception _ nil))))
+
+(defn- seal-request-body
+  "Seal the prose of a cookbook write. Everything else — the title, the tags, the
+  Scope ids, `modified_at` — goes as it was given, because it is what the search
+  and the guards are made of."
+  [cfg token method path body]
+  (let [k @seal-key
+        target (when (#{:post :put} method) (write-target (resolve-path path)))]
+    (if-not (and k target body)
+      body
+      (let [parsed (try (json/parse-string body true) (catch Exception _ nil))]
+        (if-not (map? parsed)
+          body
+          (let [stored (stored-columns cfg token target)]
+            (json/generate-string
+             (case (:table target)
+               :recipes (seal/seal-recipe-write k parsed stored)
+               :scopes (seal/seal-scope-write k parsed stored)))))))))
+
+(defn- unseal-response
+  "Every cookbook response, including the ones that are refusals: the 409 naming
+  the Recipe that moved and the 409 naming a pending proposal both carry prose,
+  and an agent reading `Refused:` with `enc:v1:…` under it has been told nothing.
+
+  The body is re-serialised rather than passed through, so `--raw` prints the
+  same JSON with possibly a different key order. `--raw` means *do not
+  pretty-print*; it has never meant *do not decrypt*."
+  [resp]
+  (let [k @seal-key]
+    (if-not (and k (json-response? resp) (seq (:body resp)))
+      resp
+      (try (update resp :body #(json/generate-string (seal/unseal-body k (json/parse-string % true))))
+           (catch Exception _ resp)))))
+
 (def ^:private cli-spec
   {:method {:desc "HTTP method (default GET, or POST when --body is given)"}
    :body {:desc "Request body, or @file to read from a file"}
@@ -262,7 +366,18 @@
                      (cond
                        (:token cfg)    (str (or (:username cfg) "machine") " (token)")
                        (:username cfg) (:username cfg)
-                       :else           "(no auth)")))))
+                       :else           "(no auth)"))))
+  ;; **Whether cookbook's prose is sealed, said out loud**, because the failure
+  ;; is silent in the direction that matters: an agent with no key writes
+  ;; plaintext into a sealed shelf and is told nothing. It names the source and
+  ;; never the key. Off is a legitimate state — it is cookbook before any of
+  ;; this — so this is a fact and not a warning.
+  (when (:cookbook @credentials)
+    (println)
+    (if-let [source (seal/key-source)]
+      (println (str "cookbook prose sealing: on, key from " source))
+      (println (str "cookbook prose sealing: off — no key. Set COOKBOOK_SEAL_KEY, or put one at "
+                    seal/key-file)))))
 
 (defn- run [app path opts]
   (let [cfg (app-config app)
@@ -290,10 +405,15 @@
         login-auth? (and (nil? static-token) (some? (:username cfg)))
         token (or static-token
                   (when login-auth? (or (cached-token app) (login! app cfg))))
+        ;; Cookbook only, and only on a write that carries prose. Sealing needs
+        ;; the token, so it happens here rather than beside `read-body` above.
+        req (cond-> req
+              (cookbook? app) (update :body #(seal-request-body cfg token method path %)))
         resp (let [r (send-request cfg token req)]
                (if (and login-auth? (= 401 (:status r)))
                  (send-request cfg (login! app cfg) req)
-                 r))]
+                 r))
+        resp (cond-> resp (cookbook? app) unseal-response)]
     (print-response resp opts)
     (if (<= 200 (:status resp) 299) 0 1)))
 

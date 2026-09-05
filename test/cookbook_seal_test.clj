@@ -43,6 +43,25 @@
     (is (= 32 key-bytes))
     (is (= 32 (count (b64-decode (:key-base64 @fixture)))))))
 
+(deftest the-binding-is-the-one-the-fixture-names
+  (testing "three tables under one name, because the server copies between them"
+    (is (= (:binding @fixture)
+           (into {} (for [[table binding] seal/bound-as] [table (name binding)]))))
+    (is (= (set (keys seal/sealed-columns)) (set (keys seal/bound-as)))
+        "every sealed table has a binding, and nothing else does")))
+
+(deftest a-value-travels-between-the-three-recipe-tables
+  (testing "archive! and approve-proposal! copy verbatim and hold no key"
+    (let [k (test-key)
+          sealed (seal/seal k :recipes :description "the body, as saved")]
+      (doseq [table [:recipes :recipe_history :recipe_proposals]]
+        (testing (name table)
+          (is (= "the body, as saved" (seal/unseal k table :description sealed))
+              "a save archives this value into recipe_history untouched")))
+      (testing "and still refuses the moves the server never makes"
+        (is (thrown? Exception (seal/unseal-text k (seal/aad :recipes :useful_when) sealed)))
+        (is (thrown? Exception (seal/unseal-text k (seal/aad :scopes :description) sealed)))))))
+
 (deftest every-vector-seals-to-exactly-the-recorded-ciphertext
   (let [k (test-key)]
     (doseq [{:keys [name aad nonce plaintext sealed]} (:vectors @fixture)]
@@ -176,10 +195,12 @@
     (is (= "because" (get-in out [:versions 0 :reason])))
     (is (= "before" (get-in out [:versions 1 :description])))
     (is (nil? (get-in out [:versions 1 :reason])))
-    (testing "the current entry really is bound to recipes, not to recipe_history"
-      (is (thrown? Exception
-                   (seal/unseal-text k (seal/aad :recipe_history :description)
-                                     (get-in body [:versions 0 :description])))))))
+    (testing "and the ladder holds because the two tables share a binding"
+      ;; The history *is* the current row, copied by the server on the next save.
+      ;; A per-table binding sealed exactly this list shut, which is how the
+      ;; grouping came to be written down.
+      (is (= "now" (seal/unseal k :recipe_history :description
+                                (get-in body [:versions 0 :description])))))))
 
 (deftest an-inbox-entry-carries-both-texts-and-they-come-from-different-tables
   (let [k (test-key)
@@ -230,6 +251,12 @@
                                      :recipe {:id 1 :version 2 :description (d "unchanged")}})]
         (is (= "filed" (get-in out [:pending :description])))
         (is (= "unchanged" (get-in out [:recipe :description])))))
+    (testing "a Recipe row carrying its own pending flag is still a Recipe"
+      ;; `pending` means two things in this API — 0/1 on a row, and a proposal
+      ;; body on a 409 or a 202 — and reading the flag as the proposal left
+      ;; every ordinary save sealed. Found end to end, pinned here.
+      (is (= "body" (:description (seal/unseal-body k {:id 1 :version 3 :pending 0
+                                                      :description (d "body")})))))
     (testing "a body with no prose in it at all is handed back as it came"
       (is (= {:success true} (seal/unseal-body k {:success true})))
       (is (= {:error "Recipe not found"} (seal/unseal-body k {:error "Recipe not found"}))))))

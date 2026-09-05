@@ -32,11 +32,18 @@
   half-migrated database work: `unseal` of a value without it hands the value
   back unchanged. Mixed state is legal everywhere, permanently.
 
-  **The AAD binds a value to its column** — `recipes/description`,
-  `recipe_history/reason` — so a ciphertext cannot be lifted from one column and
-  dropped into another by anyone holding the database file. It does not bind the
-  row: the id is assigned by `AUTOINCREMENT` on insert, so there is nothing to
-  bind to at the moment of sealing. That gap is deliberate and worth knowing.
+  **The AAD binds a value to what its column means** — `recipe/description`,
+  `recipe/reason`, `scope/description` — so a ciphertext cannot be lifted from one
+  column and dropped into another by anyone holding the database file.
+
+  It binds the *meaning* rather than the table, and `bound-as` says why at length:
+  the server copies these values between `recipes`, `recipe_history` and
+  `recipe_proposals` verbatim and without a key, so a per-table binding seals a
+  Recipe's history shut on its own first save.
+
+  It does not bind the row either: the id is assigned by `AUTOINCREMENT` on
+  insert, so at the moment of sealing there is nothing to bind to. That gap is
+  deliberate and worth knowing.
 
   ## Three rules, and they live here rather than at the call sites
 
@@ -140,10 +147,44 @@
   []
   (b64-encode (random-bytes key-length)))
 
+(def bound-as
+  "Which name a table's values are bound under — the AAD's first half.
+
+  **Three tables share one binding, and that is not sloppiness, it is the schema
+  being told the truth.** `recipes`, `recipe_history` and `recipe_proposals` are
+  three places one per-version field lives, and the server *moves values between
+  them, verbatim, without a key*:
+
+  - `db.recipe/archive!` copies the outgoing row's four columns straight into
+    `recipe_history` on every save.
+  - `db.recipe/approve-proposal!` copies a proposal's straight into `recipes`.
+  - `db.recipe/merge-content` fills a partial proposal from the current row, so a
+    `recipes` value lands in `recipe_proposals`.
+
+  Bind a ciphertext to `recipes/description` and the first save archives it into
+  a column it can no longer be read from. That is not a hypothetical: it is what
+  the first end-to-end run did, and the whole version ladder came back sealed with
+  no error anywhere to say why. The server cannot re-seal on the way past — it has
+  no key, which is the entire point — so the binding has to be one the server's own
+  copying respects.
+
+  What it still refuses is every move the server does *not* make: a description
+  into a useful-when, a reason into a context, and a Scope's prose into a
+  Recipe's. Those are the moves an attacker with the database file would want, and
+  they all fail the tag check."
+  {:recipes :recipe
+   :recipe_history :recipe
+   :recipe_proposals :recipe
+   :scopes :scope})
+
 (defn aad
-  "What a ciphertext is bound to: the column it belongs in, as `table/column`."
+  "What a ciphertext is bound to: the *meaning* of the column it belongs in, as
+  `binding/column` — `recipe/description`, `scope/description`. See `bound-as`
+  for why this is not the table name."
   [table column]
-  (str (name table) "/" (name column)))
+  (str (name (or (bound-as table)
+                 (throw (ex-info (str "no seal binding for table " table) {:table table}))))
+       "/" (name column)))
 
 (defn sealed?
   "Whether a value read out of a sealed column is actually sealed. Only ever a
@@ -228,6 +269,52 @@
      :else (seal-text k (aad table column) v))))
 
 ;; ---------------------------------------------------------------------------
+;; Where the key comes from.
+
+(def key-file
+  "The default place a key file is looked for. Mode 600, like the credentials
+  beside it."
+  (java.io.File. (System/getProperty "user.home") ".config/plurama-cli/cookbook-seal.key"))
+
+(defn load-key
+  "The key, or `nil` — and `nil` means **sealing is off**, which is cookbook's
+  behaviour before any of this existed and is what every function above already
+  understands. That is deliberate: it keeps the whole thing reversible until the
+  data is migrated, and it lets both worlds be exercised.
+
+  Three places, in order:
+
+  - `COOKBOOK_SEAL_KEY` — base64. This is the shape a `sops exec-env` wrapper
+    hands it over in on the owner's laptop, where the key lives in
+    `secrets.yaml`.
+  - `COOKBOOK_SEAL_KEY_FILE` — a path to read it from.
+  - `~/.config/plurama-cli/cookbook-seal.key` — the default file, which is the
+    shape a devbox gets it in: a mounted file, the same pattern as
+    `docker/cookbook_creds`.
+
+  A key that is present but malformed **throws**. Falling back to 'sealing off'
+  there would be the worst of both: an agent writing plaintext into a sealed
+  shelf, and nothing saying so."
+  []
+  (let [from-env (System/getenv "COOKBOOK_SEAL_KEY")
+        path (System/getenv "COOKBOOK_SEAL_KEY_FILE")
+        file (if path (java.io.File. ^String path) key-file)]
+    (cond
+      (not (str/blank? from-env)) (key-from-base64 from-env)
+      (.exists file) (key-from-base64 (slurp file))
+      :else nil)))
+
+(defn key-source
+  "Where `load-key` would find one, in words, for the places this is reported.
+  Never the key itself."
+  []
+  (cond
+    (not (str/blank? (System/getenv "COOKBOOK_SEAL_KEY"))) "COOKBOOK_SEAL_KEY"
+    (System/getenv "COOKBOOK_SEAL_KEY_FILE") (System/getenv "COOKBOOK_SEAL_KEY_FILE")
+    (.exists key-file) (str key-file)
+    :else nil))
+
+;; ---------------------------------------------------------------------------
 ;; The inventory.
 ;;
 ;; Thirteen columns, in one place. Both clients carry this list and nothing else
@@ -302,9 +389,13 @@
 
 (defn unseal-versions
   "`GET /api/recipes/:id/versions`. The newest entry is the `recipes` row itself
-  and is flagged `:current`; everything below it is a `recipe_history` row. Two
-  tables, two AADs, in one list — which is precisely the case a per-column AAD
-  makes you think about, and the reason this mapping is not left to a call site."
+  and is flagged `:current`; everything below it is a `recipe_history` row.
+
+  Both open, because the two tables share a binding — see `bound-as`, and note
+  that this list is exactly where a per-table binding was found to be wrong: the
+  history is made *by copying the current row*, so a ladder sealed per table is a
+  ladder that cannot be climbed. The table is still passed rather than assumed,
+  because it is the truth about where the row came from."
   [k body]
   (if (sequential? (:versions body))
     (update body :versions
@@ -319,10 +410,10 @@
 
 (def ^:private current-aliases
   "The inbox entry's second copy of the text: the Recipe as it reads *now*, joined
-  in under `current_` names. They are `recipes` columns wearing an alias, so they
-  unseal against `recipes`, not against the proposal they sit beside. Getting this
-  backwards would not be a silent bug — the tag check fails — which is the AAD
-  earning its place."
+  in under `current_` names. They are `recipes` columns wearing an alias, and the
+  alias is what has to be undone: the *column* is what a value is bound to, so a
+  `current_description` is a `description` and reading it as a `useful_when` fails
+  the tag check."
   {:current_useful_when :useful_when
    :current_description :description})
 
@@ -374,7 +465,14 @@
     (contains? body :versions) (unseal-versions k body)
 
     ;; The 202 from a machine PUT, and the 409 that says a proposal is pending.
-    (contains? body :pending)
+    ;;
+    ;; **`map?`, not `contains?`.** A Recipe row carries a `pending` of its own —
+    ;; 0 or 1, whether an agent has a rewrite waiting — so the key alone does not
+    ;; say which shape this is, and reading a flag as a proposal is how every
+    ;; ordinary save came back still sealed. It is worth the sentence: the two
+    ;; meanings of `pending` are both cookbook's and both correct, and only the
+    ;; type tells them apart.
+    (map? (:pending body))
     (cond-> (update body :pending #(unseal-proposal k %))
       (map? (:recipe body)) (update :recipe #(unseal-recipe k %)))
 

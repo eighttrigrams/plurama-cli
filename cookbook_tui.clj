@@ -27,7 +27,8 @@
             [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [cookbook-seal :as seal]))
 
 ;; ---------------------------------------------------------------------------
 ;; Credentials and tokens.
@@ -36,6 +37,15 @@
 ;; single files, so a `require` between the two would have to resolve both from a
 ;; checkout *and* from an installed standalone script. These ~30 lines are the one
 ;; place here where copying beats factoring; the conventions must stay identical.
+;;
+;; **One file is now required rather than copied, and it is the exception that
+;; proves that rule.** `cookbook_seal.clj` is the encryption envelope, and the
+;; sentence above is exactly right about what it costs: the deploy script has to
+;; resolve it too. It is worth paying once, because the four lines above are about
+;; thirty lines of convention — two copies drifting costs a confusing bug — while
+;; two copies of an envelope drifting costs a Recipe nobody can open, and the
+;; guard against that is a fixture, which cannot police a copy inlined into a
+;; -main script. What the deploy script must do is in that file's own docstring.
 
 (def ^:private baked-credentials
   "Base64-encoded EDN, substituted at install time by the private
@@ -69,6 +79,24 @@
                              "or add a :cookbook entry to "
                              credentials-file)
                         {})))))
+
+;; ---------------------------------------------------------------------------
+;; The seal.
+;;
+;; Cookbook's prose — the body, the useful-when line, and the reason/context an
+;; agent writes about its own change — is sealed in the clients, because the key
+;; never goes to fly. So this tool needs it to *read*, not only to write: without
+;; a key the two lines this listing is built on and the body below them are
+;; `enc:v1:…`, which is what an unreadable value honestly looks like.
+;;
+;; The envelope is `cookbook_seal.clj`, shared with `plurama_cli.clj` rather than
+;; copied — see its docstring for why that one file is the exception to the
+;; copy-beats-factoring rule the credential block above follows.
+
+(def ^:private seal-key (delay (seal/load-key)))
+
+;; ---------------------------------------------------------------------------
+;; Credentials and tokens, continued.
 
 (def ^:private token-dir
   (io/file (System/getProperty "user.home") ".cache" "plurama-cli"))
@@ -128,10 +156,18 @@
                    body (update :headers assoc "Content-Type" "application/json"))))
          resp (send (when auth? (or (cached-token) (login!))))
          resp (if (and auth? (= 401 (:status resp))) (send (login!)) resp)]
-     {:status (:status resp)
-      :body (when (seq (:body resp))
-              (try (json/parse-string (:body resp) true)
-                   (catch Exception _ (:body resp))))})))
+     (let [parsed (when (seq (:body resp))
+                    (try (json/parse-string (:body resp) true)
+                         (catch Exception _ (:body resp))))]
+       ;; **Two copies of the body, and the second one is not redundant.**
+       ;; `:body` is the text; `:sealed` is what the columns actually hold, and
+       ;; a save needs it — a value the editor did not touch has to go back as
+       ;; the very ciphertext already stored, or the server sees a change where
+       ;; there is none and writes a version for it. Unsealing is what throws
+       ;; that away, so it is caught here on the way past.
+       {:status (:status resp)
+        :sealed parsed
+        :body (seal/unseal-body @seal-key parsed)}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Rendering. Pure: state in, strings out, no input and no requests. Kept apart
@@ -255,9 +291,18 @@
                                          (seq search) (str "?search=" (java.net.URLEncoder/encode search "UTF-8"))))]
     (if (= 200 status) body (do (println (refusal status body :read)) nil))))
 
-(defn- fetch-recipe [id]
-  (let [{:keys [status body]} (api :get (str "/api/recipes/" id "?detail=full"))]
-    (if (= 200 status) body (do (println (refusal status body :read)) nil))))
+(defn- fetch-recipe
+  "One Recipe, in full — and, riding along under a namespaced key nothing here
+  ever sends, what its sealed columns actually hold. `save!` needs the second:
+  a field the editor did not touch has to be written back as the very
+  ciphertext already stored, or the server compares values, sees a change that
+  is not one, and writes a version for it."
+  [id]
+  (let [{:keys [status body sealed]} (api :get (str "/api/recipes/" id "?detail=full"))]
+    (if (= 200 status)
+      (assoc body :cookbook-seal/stored
+             (select-keys sealed [:description :useful_when :reason :context]))
+      (do (println (refusal status body :read)) nil))))
 
 (defn- create! []
   (let [title (prompt "title: ")]
@@ -266,7 +311,9 @@
       (let [useful (prompt "useful-when: ")
             body (edit-body "")
             {:keys [status body]} (api :post "/api/recipes"
-                                       {:title title :useful_when useful :description body})]
+                                       (seal/seal-recipe-write
+                                        @seal-key
+                                        {:title title :useful_when useful :description body}))]
         (if (= 201 status)
           (println (str "Created Recipe " (:id body) " (v1, private)."))
           (println (refusal status body :write)))))))
@@ -275,9 +322,16 @@
   (let [title (prompt-keep "title" (:title recipe))
         useful (prompt-keep "useful-when" (:useful_when recipe))
         body (edit-body (:description recipe))
+        ;; `stored` is what those columns hold right now, off the read this edit
+        ;; started from. An unchanged field goes back as the same bytes, so the
+        ;; server's own comparison still answers "nothing changed" — which is what
+        ;; the line below prints.
         {:keys [status body]} (api :put (str "/api/recipes/" (:id recipe))
-                                   {:title title :useful_when useful :description body
-                                    :modified_at (:modified_at recipe)})]
+                                   (seal/seal-recipe-write
+                                    @seal-key
+                                    {:title title :useful_when useful :description body
+                                     :modified_at (:modified_at recipe)}
+                                    (:cookbook-seal/stored recipe)))]
     (if (= 200 status)
       (println (if (= (:version body) (:version recipe))
                  "Nothing changed — same version, no new history entry."

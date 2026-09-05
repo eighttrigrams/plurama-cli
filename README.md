@@ -135,6 +135,14 @@ bbin install https://raw.githubusercontent.com/eighttrigrams/plurama-cli/main/pl
 
 Or run it straight from a checkout: `bb plurama_cli.clj treina /describe`.
 
+**Since the cookbook seal landed, that one-file install is no longer enough.**
+`plurama_cli.clj` and `cookbook_tui.clj` both `require` `cookbook_seal.clj`, so
+whatever installs them has to carry that file too — the private deploy script
+concatenates namespaces into one baked file already, which is exactly how
+`us-vs-them` ships. From a checkout `bb.edn` puts it on the classpath and nothing
+has to be done. If it is missing, babashka refuses to start; nothing about this
+fails quietly.
+
 ## `cookbook-tui` — a second binary in this repo
 
 `cookbook_tui.clj` is a line-based browser and editor for cookbook, installed as
@@ -176,3 +184,71 @@ either serves both.
 It reads **only** its own `:cookbook` entry. The baked blob is a map of every
 configured app — the same map already inside the `plurama-cli` binary at mode
 `700`, so not new exposure — and nothing here prints it or any other app's row.
+
+## Cookbook's prose is encrypted, and this is one of the two clients
+
+Cookbook seals the **prose** in its clients — a Recipe's description, its
+useful-when line, the `reason` and `context` an agent writes about its own
+change, and a Scope's description. Thirteen columns. Everything you *find* things
+by stays in the clear: titles, tags, Scopes and Scope tags, which is the same
+line cookbook's search already drew.
+
+It is done in the clients because cookbook runs on fly and **the key never goes
+there**. So there are exactly two surfaces that decrypt: the web UI, which holds
+a non-extractable key in the browser, and this program, which is how agents read
+and write. Both implement one envelope — `enc:v1:<base64(nonce ‖ ciphertext ‖
+tag)>`, AES-256-GCM, a fresh nonce per value — and a shared test-vector file in
+the cookbook checkout is what keeps the two from drifting.
+
+**Two credentials, and they answer different questions.** The machine token says
+who may *write*; the key says who may *read prose*. An agent with a token and no
+key can fill the shelf and cannot read a word of what is on it. That is not a
+misconfiguration to fix — it is a real and sometimes wanted arrangement.
+
+### Where the key comes from
+
+Three places, in order. The first one that answers wins:
+
+| | |
+|---|---|
+| `COOKBOOK_SEAL_KEY` | the key, base64. What a `sops exec-env` wrapper hands over. |
+| `COOKBOOK_SEAL_KEY_FILE` | a path to read it from. |
+| `~/.config/plurama-cli/cookbook-seal.key` | the default file, mode `600`. What a devbox gets mounted. |
+
+**No key means sealing is off** — reads and writes pass through untouched, which
+is cookbook before any of this existed and is what a half-migrated shelf needs.
+A key that is present but malformed throws instead: writing plaintext into a
+sealed shelf while believing otherwise is the one failure worth being loud about.
+
+`plurama-cli apps` says which of the two it is, and names the source without ever
+printing the key.
+
+### What that changes about using it
+
+Nothing, mostly. Bodies come back as text and go out as text; the sealing happens
+in between.
+
+Three things are worth knowing:
+
+- **A `--raw` cookbook response is re-serialised**, so its key order may differ
+  from the server's. `--raw` means *do not pretty-print*; it has never meant *do
+  not decrypt*.
+- **A `PUT` to `/recipes/:id` or `/scopes/:id` makes one extra read first.** A
+  value you did not change has to be written back as the very ciphertext already
+  stored, or the server compares values, sees a change that is not one, and piles
+  up a version and a history row for it. For a Recipe that read is `/versions`
+  and deliberately not `?detail=full`: a full read counts as a consumption and
+  ranks the shelf, and seal bookkeeping must not quietly reorder anybody's
+  Cookbook.
+- **Blank is never sealed.** An empty `reason` stays empty, and `null` stays
+  `null` — cookbook needs *not recorded* and *recorded, and nothing* to go on
+  meaning different things, and the server's own check that a machine write says
+  why still has a blank to see.
+
+### The one thing that is not there yet
+
+`caution` — the per-line provenance split on `?detail=full` — is computed on the
+server from the version history, and the server cannot read a sealed history. On
+a sealed Recipe it currently reports one range over one line. Moving that
+computation into the clients is its own piece of work; until it lands, read the
+number on a sealed Recipe as absent rather than as an answer.
