@@ -226,7 +226,7 @@
   [k aad-str ^String value]
   (let [raw (b64-decode (subs value (count envelope-prefix)))
         nonce (java.util.Arrays/copyOfRange raw 0 nonce-length)
-        body (java.util.Arrays/copyOfRange raw (int nonce-length) (int (alength raw)))
+        body (java.util.Arrays/copyOfRange raw (int nonce-length) (alength raw))
         c (cipher javax.crypto.Cipher/DECRYPT_MODE k nonce aad-str)]
     (String. (.doFinal c body) "UTF-8")))
 

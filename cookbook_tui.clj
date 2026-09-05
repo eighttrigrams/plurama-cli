@@ -155,19 +155,19 @@
                    body (assoc :body (json/generate-string body))
                    body (update :headers assoc "Content-Type" "application/json"))))
          resp (send (when auth? (or (cached-token) (login!))))
-         resp (if (and auth? (= 401 (:status resp))) (send (login!)) resp)]
-     (let [parsed (when (seq (:body resp))
-                    (try (json/parse-string (:body resp) true)
-                         (catch Exception _ (:body resp))))]
-       ;; **Two copies of the body, and the second one is not redundant.**
-       ;; `:body` is the text; `:sealed` is what the columns actually hold, and
-       ;; a save needs it — a value the editor did not touch has to go back as
-       ;; the very ciphertext already stored, or the server sees a change where
-       ;; there is none and writes a version for it. Unsealing is what throws
-       ;; that away, so it is caught here on the way past.
-       {:status (:status resp)
-        :sealed parsed
-        :body (seal/unseal-body @seal-key parsed)}))))
+         resp (if (and auth? (= 401 (:status resp))) (send (login!)) resp)
+         parsed (when (seq (:body resp))
+                  (try (json/parse-string (:body resp) true)
+                       (catch Exception _ (:body resp))))]
+     ;; **Two copies of the body, and the second one is not redundant.**
+     ;; `:body` is the text; `:sealed` is what the columns actually hold, and a
+     ;; save needs it — a value the editor did not touch has to go back as the
+     ;; very ciphertext already stored, or the server sees a change where there
+     ;; is none and writes a version for it. Unsealing is what throws that away,
+     ;; so it is caught here on the way past.
+     {:status (:status resp)
+      :sealed parsed
+      :body (seal/unseal-body @seal-key parsed)})))
 
 ;; ---------------------------------------------------------------------------
 ;; Rendering. Pure: state in, strings out, no input and no requests. Kept apart
