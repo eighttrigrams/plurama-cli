@@ -608,3 +608,42 @@
   "The body of a `POST /api/scopes` or a `PUT /api/scopes/:id`."
   ([k body] (seal-scope-write k body nil))
   ([k body stored] (seal-row k :scopes body stored)))
+
+;; ---------------------------------------------------------------------------
+;; What a client can tell about a response it is holding.
+
+(defn caution-over-ciphertext?
+  "Whether the `caution` a cookbook response is carrying was computed over text
+  the server could not read.
+
+  The server assesses `recipe_history` on every `?detail=full` of one Recipe and
+  on every PUT that made a version, and it holds no key. On a sealed Recipe what
+  it produces is **wrong rather than incomplete**: base64 carries no newlines, so
+  the whole ladder reads as one line, and the single range that comes back
+  carries the *last writer's* label onto line 1 of the plaintext. A Recipe the
+  owner wrote and an agent later edited at line 5 reads as if he had written none
+  of it — and `caution` is the one number in cookbook's API written for an agent
+  to act on.
+
+  So it is dropped, and the reader is told nothing rather than told a lie. The
+  browser drops it too, at the same boundary and by the same test
+  (`et.cb.seal/caution-over-ciphertext?` in the cookbook checkout) — but there it
+  is the first half of a fix, since the browser goes on to compute the split
+  itself over the unsealed ladder. Here it is the whole of it: computing it would
+  mean `et.uvt.caution` on this classpath and baked into two more binaries, which
+  is a wiring job nobody has done. plurama-cli's README says so in as many words.
+
+  **Asked of the body as it arrived**, before any unsealing, and **whether or not
+  there is a key** — a wrong split is wrong to whoever reads it, and a client with
+  no key is exactly the one that cannot tell.
+
+  Not in the shared fixture, unlike `published-surface`, and the difference is
+  worth a line: that one is a *list* two clients could widen differently, this is
+  one column already named in `et.cb.caution/ranges` and pinned by
+  `caution-test/the-text-is-the-description`. A fourth place saying `description`
+  would be a fourth place to keep in step. Both suites assert the behaviour on the
+  same shapes instead."
+  [body]
+  (boolean (and (map? body)
+                (contains? body :caution)
+                (sealed? (:description body)))))

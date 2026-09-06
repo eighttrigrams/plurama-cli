@@ -252,7 +252,7 @@ Three things are worth knowing:
   corollary: **it must pass no `stored` at all**, or it will be told that nothing
   has changed and will seal nothing.
 
-### The one thing that is not there yet
+### `caution` on a sealed Recipe: dropped, not passed on
 
 `caution` — the per-line provenance split on `?detail=full` — is computed on the
 server from the version history, and the server cannot read a sealed history. On
@@ -262,11 +262,27 @@ handed carries the *last writer's* label over line 1 of the plaintext. A Recipe
 the owner wrote and an agent later edited at line 5 reads as if he had written
 none of it.
 
-**Do not act on `caution` from a sealed Recipe.** It is the one number in this
-API written for an agent to act on, and this is the one state in which it lies.
-The web UI withholds it rather than drawing it; this client cannot, since it
-hands back what the server sent. Moving the computation into the clients is its
-own piece of work.
+**So this client takes the key off the response.** A sealed Recipe read here
+carries no `caution` at all — the same shape a visitor gets, and the same thing
+the web UI does at the same boundary. It happens **whether or not a key is
+configured**, because a client that cannot read the prose is exactly the one that
+cannot tell the split is a lie. Nothing else about the body changes; a response
+neither the drop nor the unseal touched goes over the wire byte for byte.
+
+The earlier wording here said *do not act on `caution` from a sealed Recipe*. It
+is no longer possible to, which is better than being told not to.
+
+**What is still missing is the number itself.** The browser does not merely drop
+the split, it recomputes one, over the version ladder it can unseal — see
+cookbook's README, *Which lines are his, when they are sealed*. This client could
+do the same: `us-vs-them` runs under babashka by design and `GET
+/recipes/:id/versions` is already fetched here on a write. What stops it is
+packaging rather than design — `et.uvt.core` and `et.uvt.caution` would have to
+go on `bb.edn`'s `:paths` **and** be baked into both binaries by the private
+deploy script, which already has one outstanding change against it (see *Install*
+above, on `cookbook_seal.clj`). Until that is done, an agent reading a sealed
+Recipe here is told nothing about which lines are the owner's, where the browser
+is told everything. That is a real gap and it is named rather than papered over.
 
 Publishing is the other thing not yet there: a sealed Recipe published would
 hand a visitor `enc:v1:…`, and there is no unpublish. Both binaries here refuse

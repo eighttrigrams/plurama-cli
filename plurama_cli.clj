@@ -335,9 +335,18 @@
   the Recipe that moved and the 409 naming a pending proposal both carry prose,
   and an agent reading `Refused:` with `enc:v1:…` under it has been told nothing.
 
-  The body is re-serialised rather than passed through, so `--raw` prints the
-  same JSON with possibly a different key order. `--raw` means *do not
-  pretty-print*; it has never meant *do not decrypt*.
+  **Two things happen here and only one of them is unsealing.** The other is that
+  a `caution` computed over ciphertext is taken off the body — see
+  `seal/caution-over-ciphertext?` for why a wrong provenance split is worse than
+  none. That one runs **whether or not there is a key**, which is why the key test
+  moved off the guard and into the `let`: a client with no key is precisely the
+  one that cannot tell the split is a lie.
+
+  The body is re-serialised when either of them changed something, so `--raw`
+  prints the same JSON with possibly a different key order. `--raw` means *do not
+  pretty-print*; it has never meant *do not decrypt*. A response neither of them
+  touched now goes through **byte-identical**, which it did not before: with no
+  key every cookbook response was re-serialised for nothing.
 
   The catch is for a body that says it is JSON and is not. It is **not** what
   handles a value that will not open: `seal/unseal` hands those back as they
@@ -347,9 +356,14 @@
   did during development, and it cost an afternoon."
   [resp]
   (let [k @seal-key]
-    (if-not (and k (json-response? resp) (seq (:body resp)))
+    (if-not (and (json-response? resp) (seq (:body resp)))
       resp
-      (try (update resp :body #(json/generate-string (seal/unseal-body k (json/parse-string % true))))
+      (try (let [body (json/parse-string (:body resp) true)
+                 ;; `unseal-body` is a no-op with no key, by its own first clause,
+                 ;; so the two steps compose without a second test for one.
+                 out  (-> (cond-> body (seal/caution-over-ciphertext? body) (dissoc :caution))
+                          (->> (seal/unseal-body k)))]
+             (if (= body out) resp (assoc resp :body (json/generate-string out))))
            (catch Exception _ resp)))))
 
 (def ^:private cli-spec

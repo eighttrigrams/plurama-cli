@@ -376,3 +376,35 @@
     (let [k (test-key)
           out (seal/seal-recipe-write k {:scope_ids [3] :modified_at "…"})]
       (is (= {:scope_ids [3] :modified_at "…"} out)))))
+
+(deftest a-caution-computed-over-ciphertext-is-not-passed-on
+  ;; The mirror of `et.cb.seal-test/what-a-client-can-tell-about-a-ladder` in the
+  ;; cookbook checkout. Written out in both suites rather than driven from
+  ;; `seal-vectors.edn`, on purpose: `published-surface` is in the fixture because
+  ;; it is a *list* three clients could widen differently, and this is one column
+  ;; already named in `et.cb.caution/ranges` and pinned by
+  ;; `caution-test/the-text-is-the-description`. A fourth statement of
+  ;; `description` would be a fourth thing to keep in step.
+  (let [k (test-key)
+        sealed (seal/seal k :recipes :description "a sealed body")
+        split {:legend "1.00 saved here by hand, 0.00 written by an agent"
+               :ranges [{:from 1 :to 1 :caution 1.0}]}]
+    (testing "a sealed body means the server assessed base64, so the split goes"
+      (is (true? (seal/caution-over-ciphertext?
+                  {:id 7 :version 3 :description sealed :caution split}))))
+    (testing "prose in the clear keeps the server's answer — unmigrated or published"
+      (is (false? (seal/caution-over-ciphertext?
+                   {:id 7 :version 3 :description "plain" :caution split}))))
+    (testing "a body with no split acquires no opinion about one"
+      ;; A lean read, a visitor's read, a filing PUT, a publish, a 202.
+      (is (false? (seal/caution-over-ciphertext? {:id 7 :version 3 :description sealed})))
+      (is (false? (seal/caution-over-ciphertext? {:id 7 :version 3}))))
+    (testing "and neither does a listing, a nil, or anything that is not a map"
+      (is (false? (seal/caution-over-ciphertext? nil)))
+      (is (false? (seal/caution-over-ciphertext? [{:caution split :description sealed}])))
+      (is (false? (seal/caution-over-ciphertext? "enc:v1:not-a-body"))))
+    (testing "it is answered of the body as it arrived, so no key is needed to answer it"
+      ;; The client that cannot read the prose is exactly the one that cannot tell
+      ;; the split is a lie, which is why this asks nothing of the key.
+      (is (true? (seal/caution-over-ciphertext?
+                  {:id 7 :version 3 :description sealed :caution split}))))))
