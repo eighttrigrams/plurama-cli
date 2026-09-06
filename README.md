@@ -213,12 +213,16 @@ Three places, in order. The first one that answers wins:
 |---|---|
 | `COOKBOOK_SEAL_KEY` | the key, base64. What a `sops exec-env` wrapper hands over. |
 | `COOKBOOK_SEAL_KEY_FILE` | a path to read it from. |
-| `~/.config/plurama-cli/cookbook-seal.key` | the default file, mode `600`. What a devbox gets mounted. |
+| `~/.config/plurama-cli/cookbook-seal.key` | the default file, mode `600`. |
 
 **No key means sealing is off** — reads and writes pass through untouched, which
 is cookbook before any of this existed and is what a half-migrated shelf needs.
 A key that is present but malformed throws instead: writing plaintext into a
 sealed shelf while believing otherwise is the one failure worth being loud about.
+
+**A sandboxed agent gets none of the three.** In a devbox the key stays host-side
+in the credential proxy, exactly as the passwords do — see *The proxy holds the
+key, so the box does not* below.
 
 `plurama-cli apps` says which of the two it is, and names the source without ever
 printing the key.
@@ -363,3 +367,96 @@ unseal makes the mixed window legal, and the failure mode is a cached old browse
 bundle meeting `enc:v1:…`. Afterwards the backups in `backups/` stop being
 plaintext copies of the shelf — the old tarballs still are, and restoring one
 lands back in plaintext.
+
+## The proxy holds the key, so the box does not
+
+`plurama_cli_proxy.clj` is the credential sidecar the devboxes talk to: the box
+gets a build of `plurama-cli` whose baked blob holds base-urls and no passwords,
+and this process attaches the credential on the way past. Since the cookbook seal
+it does the same thing with the key.
+
+- **Responses are unsealed** on the way back, so an agent in the box reads prose.
+- **Request prose is sealed** on the way out, so an agent writes prose.
+- Neither the key nor anything derived from it is ever in the box.
+
+The alternative was a key file mounted into the box, beside the credentials this
+whole program exists to keep out of it. It is the same trade the baked passwords
+were — except that a leaked password can be rotated and **a leaked key cannot**.
+It opens every Recipe the owner has ever written, and there is no re-encrypting
+them against a copy somebody took.
+
+The mount goes beside the credentials one, and the box gets neither:
+
+```yaml
+volumes:
+  - ${HOME}/.local/share/plurama-cli/proxy-credentials.edn:/credentials.edn:ro
+  - ${HOME}/.config/plurama-cli/cookbook-seal.key:/cookbook-seal.key:ro
+  - ${HOME}/path/to/plurama-cli/cookbook_seal.clj:/app/cookbook_seal.clj:ro
+environment:
+  BABASHKA_CLASSPATH: /app
+```
+
+The last two lines are not decoration. The proxy `require`s `cookbook_seal.clj`
+rather than carrying a second copy of the envelope, and **babashka puts neither
+the script's directory nor the working directory on the classpath by itself** — so
+that file has to be mounted and `BABASHKA_CLASSPATH` has to name where. If it is
+forgotten the proxy refuses to start, which is the loud half of the failure; the
+quiet half would have been two spellings of one envelope, which is the thing this
+project's reviews have caught twice.
+
+`PLURAMA_PROXY_SEAL_KEY` overrides the path. **No key configured is passthrough**,
+byte for byte, which is this proxy before any of this existed and is right for a
+shelf nobody has sealed yet. A key that is there and malformed stops the process
+at `docker compose up`, before the line that says *listening*.
+
+The startup line names the source and prints the key's **fingerprint** — the same
+eight characters the web UI's ⚙ panel shows, so that *the proxy holds the key my
+browser holds* is a comparison anyone can make in five seconds:
+
+```
+ cookbook prose: sealed here, key /cookbook-seal.key fingerprint 747d8453
+```
+
+### The key belongs on one side of this hop, never both
+
+If the box holds a key too, it seals before the proxy does, and the proxy sealing
+again would write `enc(enc(…))` — which the browser opens once and displays as an
+envelope, with nothing anywhere reporting an error. If the box's key were a
+*different* key, the result would open for nobody, ever.
+
+So the rule is enforced rather than believed: **a write whose prose arrives
+already sealed is refused**, 400, naming the columns.
+
+```json
+{"error":"this proxy seals cookbook prose, and description arrived already
+          sealed. The key belongs on one side of the proxy or the other, never
+          both — unset it in the box.",
+ "reason":"already-sealed","columns":["description"]}
+```
+
+The one envelope that is *not* a foreign one is the value the row already holds:
+a client echoing back a value the proxy could not open is not sealing, and
+comparing against what is stored is what tells the two apart.
+
+### What else it does, and what it never says
+
+- **A value it cannot open comes back as it is** — `enc:v1:…`, visibly — rather
+  than throwing. One unreadable column beside everything that reads beats a
+  response dropped with nothing to say why. That is rule 3 in every client here.
+- **A `caution` computed over ciphertext is taken off the body**, and this is the
+  proxy's job now rather than the box's: the in-box client asks the same question,
+  but by the time it sees a body the proxy has opened it, so it would pass on a
+  provenance split the server computed over base64 — a lie about which lines are
+  the owner's, told to the one reader written to act on it.
+- **One extra upstream read** in front of a write that carries prose, for the echo
+  rule: `/versions`, never `?detail=full`, because a full read counts as a
+  consumption and ranks the shelf. A write with no prose in it asks nothing and
+  goes over the wire byte-identical.
+- **The audit line carries a count and never a value**, and never the key:
+
+      ALLOW :put /cookbook/api/recipes/7 -> 200 sealed:2 opened
+      DENY :put /cookbook/api/recipes/7 - prose already sealed: description
+
+The in-box client needs no change for any of this. It holds no key, so its own
+sealing is off by its own first rule — the build mounted in the boxes today
+predates the seal entirely, and it goes on working.

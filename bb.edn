@@ -15,11 +15,17 @@
 ;; walker talks to a database file, so what is worth holding still about it is
 ;; what it does to rows. It builds its own database and refuses to pass without
 ;; the binary, for the same reason.
+;;
+;; The fourth needs neither. It drives the proxy sidecar's own `handle` against a
+;; cookbook it starts on a loopback port — the whole path a box's request takes,
+;; short of the compose mount.
 {:paths ["." "test"]
  :tasks {test {:doc "Run the seal suites: the shared test vectors, the pure decisions the seal added to plurama_cli, and the migration walker against a database it builds."
                :requires ([clojure.test :as t])
-               :task (do (require 'cookbook-seal-test 'plurama-cli-test 'cookbook-seal-migrate-test)
+               :task (do (require 'cookbook-seal-test 'plurama-cli-test 'cookbook-seal-migrate-test
+                                  'plurama-cli-proxy-test)
                          (let [{:keys [fail error]} (t/run-tests 'cookbook-seal-test
                                                                  'plurama-cli-test
-                                                                 'cookbook-seal-migrate-test)]
+                                                                 'cookbook-seal-migrate-test
+                                                                 'plurama-cli-proxy-test)]
                            (System/exit (if (zero? (+ fail error)) 0 1))))}}}
