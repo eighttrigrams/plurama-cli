@@ -284,43 +284,40 @@
   does not exist yet.
 
   **When the value has not changed, `stored` comes back byte for byte, whichever
-  of those two it is.** That is what keeps the server's `content-would-change?`
-  answering *no-op* to a write that changed nothing, and with it the version, the
-  history row and — for a machine write — the difference between a direct write
-  and a proposal.
+  of those it is.** That is the whole echo rule, and it is one line: *does this
+  column already say what I am about to write?* `unseal` is what asks it, and
+  `unseal` answers for all three shapes at once — it opens a ciphertext, hands a
+  plaintext straight back, and hands back an envelope it cannot open as well. So
+  an unchanged value is a no-op on a sealed row, on an unmigrated row, and on a
+  row this client cannot read. The rule used to be written as three branches and
+  they disagreed with the browser's on the third.
 
-  The plaintext half of that rule is not an optimisation, it is the mixed-state
-  window the rollout mandates: clients are deployed first and the data is sealed
-  later, so for a while every row is unmigrated. Sealing an unchanged plaintext
-  there would make an agent's idempotent re-`PUT` a version bump, a history row
-  and an inbox entry — audit note A's corruption arriving through the very door
-  the echo rule was built to close. So an unchanged value on an unmigrated row
-  stays plaintext, and the row seals on its next real edit.
+  What that keeps working is the server's `content-would-change?`, and with it the
+  version, the history row and — for a machine write — the difference between a
+  direct write and a proposal.
+
+  The unmigrated case is not an optimisation, it is the window the rollout
+  mandates: clients are deployed first and the data is sealed later, so for a
+  while every row is unmigrated. Sealing an unchanged plaintext there would make
+  an agent's idempotent re-`PUT` a version bump, a history row and an inbox entry
+  — audit note A's corruption arriving through the very door the echo rule was
+  built to close. The row seals on its next real edit.
+
+  The unreadable case is the one a wrong or rotated key produces. Sealing there
+  would write `enc_new(enc_old(…))`, and the *next* no-op would nest it again,
+  once per cycle without bound, on a Recipe nobody can read to notice. A no-op
+  stays a no-op, which is what the rule is for.
 
   **A migration pass must therefore pass `nil` as `stored`**, and this is the one
-  place that trap is written down: a walker that handed the plaintext it just
-  read in as `stored` would be told, correctly, that nothing changed, and would
-  seal nothing at all.
-
-  A `stored` that will not open is treated as *not matching* rather than as an
-  error: refusing the write would leave a client holding the only copy of the new
-  text with nowhere to put it."
+  place that trap is written down: a walker that handed the plaintext it just read
+  in as `stored` would be told, correctly, that nothing changed, and would seal
+  nothing at all."
   ([k table column v] (seal k table column v nil))
   ([k table column v stored]
    (cond
      (nil? k) v
      (blank-value? v) v
-
-     ;; Unchanged on a sealed row: hand back the very bytes already there.
-     (and (sealed? stored)
-          (= v (try (unseal-text k (aad table column) stored)
-                    (catch Exception _ ::unreadable))))
-     stored
-
-     ;; Unchanged on a row nobody has migrated yet: leave it alone.
-     (and (string? stored) (not (sealed? stored)) (= v stored))
-     stored
-
+     (= v (unseal k table column stored)) stored
      :else (seal-text k (aad table column) v))))
 
 ;; ---------------------------------------------------------------------------

@@ -110,7 +110,16 @@
           (testing "and it does not fail a write either"
             (let [out (seal/seal k :recipes :description "the new text" v)]
               (is (seal/sealed? out))
-              (is (= "the new text" (seal/unseal k :recipes :description out))))))))))
+              (is (= "the new text" (seal/unseal k :recipes :description out)))))
+          (testing "and writing it back unchanged is a no-op, not a second envelope"
+            ;; The shape the two clients diverged on: `v` and `stored` both the
+            ;; unopenable value. A wrong or rotated key hands a client
+            ;; `enc:v1:…` where prose should be; a save of "keep everything"
+            ;; writes exactly that back. Sealing it would store
+            ;; enc_new(enc_old(…)), and the next no-op would nest it again,
+            ;; once per cycle without bound, on a Recipe nobody can read to
+            ;; notice.
+            (is (= v (seal/seal k :recipes :description v v)))))))))
 
 (deftest a-tampered-envelope-fails-to-open
   (doseq [{:keys [name aad sealed key-base64]} (:tamper @fixture)]
