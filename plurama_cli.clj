@@ -251,14 +251,29 @@
 (defn- seal-request-body
   "Seal the prose of a cookbook write. Everything else — the title, the tags, the
   Scope ids, `modified_at` — goes as it was given, because it is what the search
-  and the guards are made of."
+  and the guards are made of.
+
+  **A body carrying no prose at all is returned untouched, and never asks the
+  server anything.** That is the guard worth naming, because without it a filing
+  PUT paid for the echo rule it had no use for: `-d '{\"tags\":\"x\"}'` fetched a
+  Recipe's whole version ladder to look up ciphertexts for columns it was not
+  sending, and `PUT /scopes/3 -d '{\"title\":\"x\"}'` pulled the entire Scope
+  listing for the same nothing. The extra read is unavoidable when there is
+  something to echo; it is only unavoidable then.
+
+  Returning the body itself rather than a re-serialisation is the second half of
+  that: a write with no prose in it now goes over the wire byte-identical to what
+  the caller typed, exactly as it did before any of this existed."
   [cfg token method path body]
   (let [k @seal-key
         target (when (#{:post :put} method) (write-target (resolve-path path)))]
     (if-not (and k target body)
       body
-      (let [parsed (try (json/parse-string body true) (catch Exception _ nil))]
-        (if-not (map? parsed)
+      (let [parsed (try (json/parse-string body true) (catch Exception _ nil))
+            prose (when (map? parsed)
+                    (seq (filter #(contains? parsed %)
+                                 (get seal/sealed-columns (:table target)))))]
+        (if-not prose
           body
           (let [stored (stored-columns cfg token target)]
             (json/generate-string
