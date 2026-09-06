@@ -4,39 +4,21 @@
 
   Deliberately narrow. This program is a one-shot client — parse argv, do one
   request, print, exit — and most of it is only true against a running cookbook.
-  What is *not* is the pair of pure decisions the seal added to it: which write
-  carries prose, and which path names a publish. Both were checked by hand and by
-  eye when they landed, and both are the kind of thing that goes wrong invisibly:
-  a prose column dropped from the inventory here would send prose out in the clear
-  and nothing would say so."
+  What is *not* is what `seal-request-body` decides: whether a write pays for the
+  echo rule's extra read at all, and whether the answer to that read means the
+  body goes out sealed or exactly as it was typed.
+
+  **The questions themselves moved next door** when the proxy sidecar became a
+  third client that seals a write — `write-target`, `prose-in`, `state-path`,
+  `state-of` and `seal-write` are in `cookbook-seal` now, with the suite that
+  reads the fixture. What is left here is this program wiring them together, which
+  is the part only this program has."
   (:require [clojure.test :refer [deftest is testing]]
             [cheshire.core :as json]
             [cookbook-seal :as seal]
             [plurama-cli]))
 
-(def ^:private prose-in @#'plurama-cli/prose-in)
-(def ^:private write-target @#'plurama-cli/write-target)
-(def ^:private publish-target @#'plurama-cli/publish-target)
 (def ^:private seal-request-body @#'plurama-cli/seal-request-body)
-
-(deftest prose-in-agrees-with-the-inventory-and-nothing-else
-  (testing "a Recipe write"
-    (is (= [:description] (prose-in :recipes {:description "x" :tags "y"})))
-    (is (= [:description :useful_when :reason :context]
-           (prose-in :recipes {:description "d" :useful_when "u" :reason "r" :context "c"})))
-    (is (nil? (prose-in :recipes {:tags "x"})) "filing is not prose")
-    (is (nil? (prose-in :recipes {:title "x" :scope_ids [1] :modified_at "…"}))
-        "and neither is anything else the search or the guards are made of"))
-  (testing "a Scope write"
-    (is (= [:description] (prose-in :scopes {:title "x" :description "d"})))
-    (is (nil? (prose-in :scopes {:title "x" :tags "y"}))))
-  (testing "and it is the inventory that decides, not a second list"
-    (doseq [[table columns] seal/sealed-columns]
-      (is (= columns (prose-in table (zipmap columns (repeat "v"))))
-          (str "every sealed column of " table " has to be seen"))))
-  (testing "junk is not prose"
-    (is (nil? (prose-in :recipes nil)))
-    (is (nil? (prose-in :recipes "not a map")))))
 
 (def ^:private test-key
   ;; Generated here rather than taken from `seal-vectors.edn`: these are tests
@@ -102,23 +84,6 @@
     (is (false? (seal/published-surface-sealed? {:description "clear" :useful_when "clear"})))
     (is (false? (seal/published-surface-sealed? {:reason "enc:v1:AAAA"}))
         "a sealed reason is not a published surface — a visitor is served none")))
-
-(deftest write-target-names-the-two-tables-a-client-writes
-  (is (= {:table :recipes} (write-target "/api/recipes")))
-  (is (= {:table :scopes} (write-target "/api/scopes")))
-  (is (= {:table :recipes :id 7} (write-target "/api/recipes/7")))
-  (is (= {:table :scopes :id 3} (write-target "/api/scopes/3?overwrite=true")))
-  (testing "and nothing else"
-    (is (nil? (write-target "/api/recipes/7/publish")))
-    (is (nil? (write-target "/api/recipes/7/versions")))
-    (is (nil? (write-target "/api/inbox/9/approve")))
-    (is (nil? (write-target "/api/machine-user/password")))))
-
-(deftest publish-target-is-its-own-matcher
-  (is (= 7 (publish-target "/api/recipes/7/publish")))
-  (is (nil? (publish-target "/api/recipes/7")))
-  (is (nil? (publish-target "/api/recipes")))
-  (is (nil? (publish-target "/api/inbox/7/approve"))))
 
 ;; ---------------------------------------------------------------------------
 ;; The published rule

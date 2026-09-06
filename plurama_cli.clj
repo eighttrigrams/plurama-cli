@@ -202,80 +202,26 @@
 
 (defn- cookbook? [app] (= "cookbook" app))
 
-(defn- write-target
-  "Which table a cookbook write is aimed at, and at which row — `nil` for
-  everything else, which is most of the API. `/recipes/7/publish` is deliberately
-  not matched: what it can carry is an *unseal* — plaintext going back over
-  ciphertext — which is the opposite of what this function is for, and which no
-  caller from here may make anyway."
-  [path]
-  (let [p (-> path (str/split #"\?") first (str/replace #"/$" ""))
-        id #(parse-long (last (str/split % #"/")))]
-    (cond
-      (= p "/api/recipes") {:table :recipes}
-      (= p "/api/scopes")  {:table :scopes}
-      (re-matches #"/api/recipes/\d+" p) {:table :recipes :id (id p)}
-      (re-matches #"/api/scopes/\d+" p)  {:table :scopes  :id (id p)})))
-
 (defn- current-state
   "What the seal needs to know about the row a write is aimed at, out of **one**
-  read: `:stored`, and `:published?`.
+  read — `:stored` and `:published?`, both parsed by `seal/state-of`, which is
+  where the meaning of that read is written down for every client that makes it.
 
-  `:stored` is what that row's sealed columns hold **right now**, so a value the
-  caller did not change can be written back as the very ciphertext already stored.
-  Without it, a fresh nonce makes every resend look like a change to the server,
-  and an agent that PUTs the same text twice piles up versions, history rows and
-  inbox entries — corrupting the ladder the seal exists to protect.
+  What is here is the round trip and nothing else.
 
-  `:published?` is the *other* rule, and it arrived with publish-as-unseal:
-  publishing opens every envelope in a Recipe, one way, because a visitor has no
-  key and there is no unpublish — so a write to a published Recipe must go out in
-  the clear or it puts `enc:v1:…` back on a public page. Cookbook refuses such a
-  write with a 400, so this is the honest path rather than the guarantee.
-
-  A Recipe's is read from `/versions` and **not** from `?detail=full`, which is
-  the whole reason this is reachable at all: a full read counts as a consumption
-  and ranks the shelf, so seal bookkeeping would quietly reorder the owner's
-  Cookbook. `/versions` carries all four columns of the current row, says whether
-  the Recipe is published, and counts nothing. Both facts out of the read that was
-  already being made is why the second rule costs no round trip.
-
-  A Scope has no latch — the projection that hides a Scope's prose from a visitor
-  is not the publish latch — so `:published?` is always false there.
-
-  Anything that goes wrong here — a 404, a 401, a body that will not parse —
-  yields `nil` for both, which means *nothing to echo* and a fresh seal. That is
-  the safe direction for the echo rule: a redundant version is a wart, and a
-  refused write is a lost one. It is the *unsafe* direction for the published
-  rule, and deliberately: a client that cannot read the Recipe cannot know, and
-  the server refuses what this would get wrong."
-  [cfg token {:keys [table id]}]
-  (when id
+  Anything that goes wrong — a 404, a 401, a body that will not parse — yields
+  `nil` for both, which means *nothing to echo* and a fresh seal. That is the safe
+  direction for the echo rule: a redundant version is a wart, and a refused write
+  is a lost one. It is the *unsafe* direction for the published rule, and
+  deliberately: a client that cannot read the Recipe cannot know, and the server
+  refuses what this would get wrong."
+  [cfg token target]
+  (when-let [path (seal/state-path target)]
     (try
-      (let [path (case table
-                   :recipes (str "/api/recipes/" id "/versions")
-                   :scopes "/api/scopes")
-            resp (send-request cfg token {:method :get :path path :headers {}})]
+      (let [resp (send-request cfg token {:method :get :path path :headers {}})]
         (when (= 200 (:status resp))
-          (let [parsed (json/parse-string (:body resp) true)]
-            (case table
-              :recipes {:stored (some-> (->> parsed :versions (filter :current) first)
-                                        (select-keys [:description :useful_when :reason :context]))
-                        :published? (= 1 (:published parsed))}
-              :scopes {:stored (some-> (->> parsed (filter #(= id (:id %))) first)
-                                       (select-keys [:description]))
-                       :published? false}))))
+          (seal/state-of target (json/parse-string (:body resp) true))))
       (catch Exception _ nil))))
-
-(defn- prose-in
-  "The sealed columns a parsed write body actually carries, or `nil`. Pure, and a
-  function of its own so that a suite can hold it still: it is what decides
-  whether a write pays for the echo rule's extra read, and getting it wrong in
-  either direction is invisible — too wide and a filing PUT fetches a version
-  ladder it discards, too narrow and a prose write goes out unsealed."
-  [table parsed]
-  (when (map? parsed)
-    (seq (filter #(contains? parsed %) (get seal/sealed-columns table)))))
 
 (defn- seal-request-body
   "Seal the prose of a cookbook write. Everything else — the title, the tags, the
@@ -291,38 +237,21 @@
   something to echo; it is only unavoidable then.
 
   Returning the body itself rather than a re-serialisation is the second half of
-  that: a write with no prose in it now goes over the wire byte-identical to what
-  the caller typed, exactly as it did before any of this existed."
+  that, and it is what `seal/seal-write` answering `nil` means: a write with no
+  prose in it, and a write to a published Recipe, both go over the wire
+  byte-identical to what the caller typed, exactly as they did before any of this
+  existed."
   [cfg token method path body]
   (let [k @seal-key
-        target (when (#{:post :put} method) (write-target (resolve-path path)))]
+        target (when (#{:post :put} method) (seal/write-target (resolve-path path)))]
     (if-not (and k target body)
       body
       (let [parsed (try (json/parse-string body true) (catch Exception _ nil))]
-        (if-not (prose-in (:table target) parsed)
+        (if-not (seal/prose-in (:table target) parsed)
           body
-          (let [{:keys [stored published?]} (current-state cfg token target)]
-            ;; **A published Recipe's prose goes out in the clear**, and the body
-            ;; goes over the wire byte-identical, exactly as a prose-less one does
-            ;; above. Publishing unsealed the Recipe one way — a visitor has no key
-            ;; and there is no unpublish — so sealing it again would put `enc:v1:…`
-            ;; back on a public page. Cookbook refuses the write anyway; this is
-            ;; what keeps an honest agent from meeting that refusal.
-            (if published?
-              body
-              (json/generate-string
-               (case (:table target)
-                 :recipes (seal/seal-recipe-write k parsed stored)
-                 :scopes (seal/seal-scope-write k parsed stored))))))))))
-
-(defn- publish-target
-  "The Recipe id a cookbook publish names, or `nil`. Deliberately a separate
-  matcher from `write-target`: a publish from here carries no body worth sealing —
-  what it carries, on a sealed Recipe, is something to refuse."
-  [path]
-  (when-let [[_ id] (re-matches #"/api/recipes/(\d+)/publish/?"
-                                (-> path (str/split #"\?") first))]
-    (parse-long id)))
+          (if-let [sealed (seal/seal-write k target parsed (current-state cfg token target))]
+            (json/generate-string sealed)
+            body))))))
 
 (defn- refuse-sealed-publish!
   "Publishing hands the prose to somebody who has no key and must never have one,
@@ -393,10 +322,10 @@
     (if-not (and (json-response? resp) (seq (:body resp)))
       resp
       (try (let [body (json/parse-string (:body resp) true)
-                 ;; `unseal-body` is a no-op with no key, by its own first clause,
-                 ;; so the two steps compose without a second test for one.
-                 out  (-> (cond-> body (seal/caution-over-ciphertext? body) (dissoc :caution))
-                          (->> (seal/unseal-body k)))]
+                 ;; Both steps, in the order `seal/unseal-response-body` explains —
+                 ;; and `unseal-body` is a no-op with no key by its own first
+                 ;; clause, so they compose without a second test for one.
+                 out (seal/unseal-response-body k body)]
              (if (= body out) resp (assoc resp :body (json/generate-string out))))
            (catch Exception _ resp)))))
 
@@ -533,7 +462,7 @@
         ;; Cookbook only, and only on a write that carries prose. Sealing needs
         ;; the token, so it happens here rather than beside `read-body` above.
         _ (when-let [id (and (cookbook? app) (= :post method)
-                             (publish-target (resolve-path path)))]
+                             (seal/publish-target (resolve-path path)))]
             (refuse-sealed-publish! cfg token id))
         req (cond-> req
               (cookbook? app) (update :body #(seal-request-body cfg token method path %)))

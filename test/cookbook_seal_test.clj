@@ -434,3 +434,125 @@
       ;; the split is a lie, which is why this asks nothing of the key.
       (is (true? (seal/caution-over-ciphertext?
                   {:id 7 :version 3 :description sealed :caution split}))))))
+
+;; ---------------------------------------------------------------------------
+;; What a write path has to know.
+;;
+;; These moved here from `plurama_cli_test.clj` when the proxy sidecar became a
+;; third client that seals a write. They were never about `plurama_cli.clj`; they
+;; are about which cookbook paths carry prose and what the read in front of a
+;; write means, and two clients answering that differently is the shape of thing
+;; this file exists to make impossible.
+
+(deftest prose-in-agrees-with-the-inventory-and-nothing-else
+  (testing "a Recipe write"
+    (is (= [:description] (seal/prose-in :recipes {:description "x" :tags "y"})))
+    (is (= [:description :useful_when :reason :context]
+           (seal/prose-in :recipes {:description "d" :useful_when "u" :reason "r" :context "c"})))
+    (is (nil? (seal/prose-in :recipes {:tags "x"})) "filing is not prose")
+    (is (nil? (seal/prose-in :recipes {:title "x" :scope_ids [1] :modified_at "…"}))
+        "and neither is anything else the search or the guards are made of"))
+  (testing "a Scope write"
+    (is (= [:description] (seal/prose-in :scopes {:title "x" :description "d"})))
+    (is (nil? (seal/prose-in :scopes {:title "x" :tags "y"}))))
+  (testing "and it is the inventory that decides, not a second list"
+    (doseq [[table columns] seal/sealed-columns]
+      (is (= columns (seal/prose-in table (zipmap columns (repeat "v"))))
+          (str "every sealed column of " table " has to be seen"))))
+  (testing "junk is not prose"
+    (is (nil? (seal/prose-in :recipes nil)))
+    (is (nil? (seal/prose-in :recipes "not a map")))))
+
+(deftest write-target-names-the-two-tables-a-client-writes
+  (is (= {:table :recipes} (seal/write-target "/api/recipes")))
+  (is (= {:table :scopes} (seal/write-target "/api/scopes")))
+  (is (= {:table :recipes :id 7} (seal/write-target "/api/recipes/7")))
+  (is (= {:table :scopes :id 3} (seal/write-target "/api/scopes/3?overwrite=true")))
+  (testing "and nothing else"
+    (is (nil? (seal/write-target "/api/recipes/7/publish")))
+    (is (nil? (seal/write-target "/api/recipes/7/versions")))
+    (is (nil? (seal/write-target "/api/recipes/7/sealed")))
+    (is (nil? (seal/write-target "/api/inbox/9/approve")))
+    (is (nil? (seal/write-target "/api/machine-user/password")))))
+
+(deftest publish-target-is-its-own-matcher
+  (is (= 7 (seal/publish-target "/api/recipes/7/publish")))
+  (is (nil? (seal/publish-target "/api/recipes/7")))
+  (is (nil? (seal/publish-target "/api/recipes")))
+  (is (nil? (seal/publish-target "/api/inbox/7/approve"))))
+
+(deftest the-read-in-front-of-a-write-is-versions-and-not-a-full-read
+  (testing "a full read counts as a consumption and ranks the shelf, so seal
+    bookkeeping would quietly reorder the owner's Cookbook. Named here because
+    three clients make this read and only one of them was ever reviewed for it."
+    (is (= "/api/recipes/7/versions" (seal/state-path {:table :recipes :id 7})))
+    (is (= "/api/scopes" (seal/state-path {:table :scopes :id 3})))
+    (testing "and a create has no row to read"
+      (is (nil? (seal/state-path {:table :recipes})))
+      (is (nil? (seal/state-path {:table :scopes}))))))
+
+(deftest state-of-reads-both-rules-out-of-one-round-trip
+  (testing "a Recipe: the current row's four columns, and the latch"
+    (let [body {:published 0
+                :versions [{:version 3 :current true :description "d" :useful_when "u"
+                            :reason "r" :context "c" :title "not prose"}
+                           {:version 2 :description "old"}]}]
+      (is (= {:stored {:description "d" :useful_when "u" :reason "r" :context "c"}
+              :published? false}
+             (seal/state-of {:table :recipes :id 7} body))
+          "the title comes along on that read and is not the seal's business")
+      (is (true? (:published? (seal/state-of {:table :recipes :id 7}
+                                             (assoc body :published 1)))))))
+  (testing "a Scope: its row out of the listing, and never a latch"
+    (let [listing [{:id 1 :title "a" :description "one"} {:id 3 :title "b" :description "three"}]]
+      (is (= {:stored {:description "three"} :published? false}
+             (seal/state-of {:table :scopes :id 3} listing)))
+      (is (= {:stored nil :published? false} (seal/state-of {:table :scopes :id 9} listing))
+          "a Scope the listing does not carry is nothing to echo, not an error")))
+  (testing "and every column it picks up is one the inventory named"
+    (is (= (set (:recipes seal/sealed-columns))
+           (set (keys (:stored (seal/state-of {:table :recipes :id 7}
+                                              {:versions [{:current true :description "d"
+                                                           :useful_when "u" :reason "r"
+                                                           :context "c"}]}))))))))
+
+(deftest seal-write-answers-nil-for-a-published-recipe
+  (testing "and `nil` is not an unchanged map: it is how a client is told to send
+    the body it was given, byte for byte, rather than a re-serialisation of it
+    with a different key order"
+    (let [k (test-key)
+          body {:description "a line meant for strangers" :title "t"}]
+      (is (nil? (seal/seal-write k {:table :recipes} body {:published? true})))
+      (let [out (seal/seal-write k {:table :recipes} body {:published? false})]
+        (is (seal/sealed? (:description out)))
+        (is (= "t" (:title out)) "and nothing that is not prose was touched")
+        (is (= "a line meant for strangers"
+               (seal/unseal k :recipes :description (:description out)))))
+      (testing "with the stored value in hand, an unchanged one echoes"
+        (let [stored (seal/seal k :recipes :description "a line meant for strangers")]
+          (is (= stored (:description (seal/seal-write k {:table :recipes} body
+                                                       {:stored {:description stored}})))))))))
+
+(deftest the-caution-question-is-asked-before-a-word-is-opened
+  (testing "**the order is the whole of it.** `caution-over-ciphertext?` reads the
+    description, so a client that unsealed first would find plaintext there and
+    conclude the server's split had been computed over readable text. It is why
+    whoever unseals is the one that must drop the caution — which is not an
+    abstraction: the proxy sidecar unseals on behalf of a box whose own client
+    asks this question a moment later, of a body already opened."
+    (let [k (test-key)
+          body {:id 7 :version 3
+                :description (seal/seal k :recipes :description "line one\nline two")
+                :caution {:legend "…" :ranges [{:from 1 :to 1 :caution 1.0}]}}
+          out (seal/unseal-response-body k body)]
+      (is (= "line one\nline two" (:description out)) "opened")
+      (is (not (contains? out :caution)) "and the split that was computed over base64 is gone"))
+    (testing "a plaintext Recipe keeps its split — unmigrated, or published"
+      (let [body {:id 7 :version 3 :description "plain" :caution {:ranges []}}]
+        (is (= body (seal/unseal-response-body (test-key) body)))))
+    (testing "and with no key the drop still happens, because a client that cannot
+      read the prose is exactly the one that cannot tell the split is a lie"
+      (let [sealed (seal/seal (test-key) :recipes :description "line one\nline two")
+            body {:id 7 :version 3 :description sealed :caution {:ranges []}}]
+        (is (= {:id 7 :version 3 :description sealed}
+               (seal/unseal-response-body nil body)))))))

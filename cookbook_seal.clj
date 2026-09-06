@@ -676,3 +676,124 @@
   (boolean (and (map? body)
                 (contains? body :caution)
                 (sealed? (:description body)))))
+
+;; ---------------------------------------------------------------------------
+;; What a write path has to know, and why it is here rather than in one of them.
+;;
+;; **Three clients seal a cookbook write now, and they differ only in how they
+;; make an HTTP request.** `plurama_cli.clj` and `cookbook_tui.clj` do it from the
+;; owner's laptop, or from a box that was handed a key; `plurama_cli_proxy.clj`
+;; does it from outside a sandbox, on behalf of a box that holds nothing at all.
+;; What none of them may differ about is *which* paths carry prose, *which* read
+;; says what the row holds now, and what that read means — because getting any of
+;; those wrong is invisible from the outside. Too narrow and prose goes out in the
+;; clear; too wide and a filing PUT drags down a version ladder it discards; a
+;; misread `published` puts an envelope back onto a public page.
+;;
+;; So they live here, pure, beside the inventory they are made of. The transport
+;; stays with each caller, because that is the part that genuinely differs.
+
+(defn write-target
+  "Which table a cookbook write is aimed at, and at which row — `nil` for
+  everything else, which is most of the API. `/recipes/7/publish` is deliberately
+  not matched: what it can carry is an *unseal*, plaintext going back over
+  ciphertext, which is the opposite of what this is for."
+  [path]
+  (let [p (-> path (str/split #"\?") first (str/replace #"/$" ""))
+        id #(parse-long (last (str/split % #"/")))]
+    (cond
+      (= p "/api/recipes") {:table :recipes}
+      (= p "/api/scopes")  {:table :scopes}
+      (re-matches #"/api/recipes/\d+" p) {:table :recipes :id (id p)}
+      (re-matches #"/api/scopes/\d+" p)  {:table :scopes  :id (id p)})))
+
+(defn publish-target
+  "The Recipe id a cookbook publish names, or `nil`. A separate matcher from
+  `write-target` on purpose: a publish carries no body worth sealing — what it
+  carries, on a sealed Recipe, is something to refuse."
+  [path]
+  (when-let [[_ id] (re-matches #"/api/recipes/(\d+)/publish/?"
+                                (-> path (str/split #"\?") first))]
+    (parse-long id)))
+
+(defn prose-in
+  "The sealed columns a parsed write body actually carries, or `nil`. It decides
+  whether a write pays for the echo rule's extra read, and it is a named function
+  rather than an `if` because getting it wrong in either direction says nothing:
+  too wide and `-d '{\"tags\":\"x\"}'` fetches a whole version ladder to look up
+  columns it is not sending, too narrow and a prose write goes out unsealed."
+  [table parsed]
+  (when (map? parsed)
+    (seq (filter #(contains? parsed %) (get sealed-columns table)))))
+
+(defn state-path
+  "The read a write has to make first, or `nil` when there is no row yet.
+
+  **A Recipe's is `/versions` and deliberately not `?detail=full`**: a full read
+  counts as a consumption and ranks the shelf, so seal bookkeeping would quietly
+  reorder the owner's Cookbook. `/versions` carries all four columns of the
+  current row, says whether the Recipe is published, and counts nothing.
+
+  A Scope has no read of one alone, so it is the listing."
+  [{:keys [table id]}]
+  (when id
+    (case table
+      :recipes (str "/api/recipes/" id "/versions")
+      :scopes "/api/scopes")))
+
+(defn state-of
+  "What that read says: `:stored` and `:published?`, out of one round trip.
+
+  `:stored` is what the row's sealed columns hold **right now**, so that a value
+  the caller did not change can be written back as the very ciphertext already
+  there. Without it a fresh nonce makes every resend look like a change to the
+  server, and an agent that PUTs the same text twice piles up versions, history
+  rows and inbox entries — corrupting the ladder the seal exists to protect.
+
+  `:published?` is the other rule, and it arrived with publish-as-unseal:
+  publishing opens every envelope in a Recipe, one way, because a visitor has no
+  key and there is no unpublish — so a write to a published Recipe must go out in
+  the clear or it puts `enc:v1:…` back on a public page. Cookbook refuses such a
+  write with a 400, so this is the honest path rather than the guarantee.
+
+  A Scope has no latch — the projection that hides a Scope's prose from a visitor
+  is not the publish latch — so `:published?` is always false there."
+  [{:keys [table id]} parsed]
+  (case table
+    :recipes {:stored (some-> (->> parsed :versions (filter :current) first)
+                              (select-keys (get sealed-columns :recipes)))
+              :published? (= 1 (:published parsed))}
+    :scopes {:stored (some-> (->> parsed (filter #(= id (:id %))) first)
+                             (select-keys (get sealed-columns :scopes)))
+             :published? false}))
+
+(defn seal-write
+  "The write body with its prose sealed — or **`nil`, meaning send what you were
+  given, untouched**.
+
+  That second answer is not the same as an unchanged map handed back. A client
+  that re-serialises a body it did not change alters its key order for no reason,
+  and both callers promise that a write they had no business touching goes over
+  the wire byte for byte as it was typed. `nil` is how that is said.
+
+  It is the answer for a published Recipe and for nothing else — a body with no
+  prose in it never gets this far, because asking would have cost a round trip
+  the caller already decided not to spend."
+  [k target parsed {:keys [stored published?]}]
+  (when-not published?
+    (seal-row k (:table target) parsed stored)))
+
+(defn unseal-response-body
+  "The two things that happen to a cookbook response, and **the order is the whole
+  of it**: the caution question is asked of the body *as it arrived*, before a
+  word of it is opened.
+
+  `caution-over-ciphertext?` reads `(sealed? (:description body))`, so a client
+  that unsealed first would find a plaintext description there and conclude the
+  split had been computed over readable text. It had not. That is not
+  hypothetical, it is the trap the proxy sidecar sits in: the box's own client
+  asks this question too, and by the time it sees a body the proxy has already
+  opened it. Whoever unseals is therefore the one that must drop the caution."
+  [k body]
+  (-> (cond-> body (caution-over-ciphertext? body) (dissoc :caution))
+      (->> (unseal-body k))))
