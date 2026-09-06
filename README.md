@@ -249,6 +249,19 @@ Three things are worth knowing:
 
 `caution` — the per-line provenance split on `?detail=full` — is computed on the
 server from the version history, and the server cannot read a sealed history. On
-a sealed Recipe it currently reports one range over one line. Moving that
-computation into the clients is its own piece of work; until it lands, read the
-number on a sealed Recipe as absent rather than as an answer.
+a sealed Recipe what comes back is **wrong, not incomplete**: base64 carries no
+newlines, so the whole ladder reads as one line, and the single range you are
+handed carries the *last writer's* label over line 1 of the plaintext. A Recipe
+the owner wrote and an agent later edited at line 5 reads as if he had written
+none of it.
+
+**Do not act on `caution` from a sealed Recipe.** It is the one number in this
+API written for an agent to act on, and this is the one state in which it lies.
+The web UI withholds it rather than drawing it; this client cannot, since it
+hands back what the server sent. Moving the computation into the clients is its
+own piece of work.
+
+Publishing is the other thing not yet there: a sealed Recipe published would
+hand a visitor `enc:v1:…`, and there is no unpublish. Both binaries here refuse
+to publish one, with a message saying so — an interlock until publishing learns
+to unseal.
