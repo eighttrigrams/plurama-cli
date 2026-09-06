@@ -250,6 +250,26 @@
     (is (= "safe agentic coding" (get-in out [:scopes 0 :description])))
     (is (= "A title, in the clear" (:recipe_title out)))))
 
+(deftest unseal-proposal-means-the-same-thing-in-both-clients
+  (testing "the agent's own text and, where a shape carries them, the current_ aliases"
+    (let [k (test-key)
+          p (seal/unseal-proposal
+             k {:base_version 2
+                :description (seal/seal k :recipe_proposals :description "proposed")
+                :reason (seal/seal k :recipe_proposals :reason "why")
+                :current_description (seal/seal k :recipes :description "as it reads now")
+                :current_useful_when (seal/seal k :recipes :useful_when "when you need it")})]
+      (is (= "proposed" (:description p)))
+      (is (= "why" (:reason p)))
+      (is (= "as it reads now" (:current_description p)))
+      (is (= "when you need it" (:current_useful_when p))))
+    (testing "and a shape without them is untouched by that half"
+      (let [k (test-key)
+            p (seal/unseal-proposal k {:base_version 2
+                                       :description (seal/seal k :recipe_proposals :description "proposed")})]
+        (is (= "proposed" (:description p)))
+        (is (not (contains? p :current_description)))))))
+
 (deftest unseal-body-recognises-the-shapes-the-api-answers-with
   (let [k (test-key)
         d #(seal/seal k :recipes :description %)]

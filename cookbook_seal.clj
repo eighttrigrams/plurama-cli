@@ -483,12 +483,6 @@
             #(mapv (fn [v] (unseal-row k (if (:current v) :recipes :recipe_history) v)) %))
     body))
 
-(defn unseal-proposal
-  "A proposal as `pending-body` renders it: the agent's own text, out of
-  `recipe_proposals`."
-  [k p]
-  (unseal-row k :recipe_proposals p))
-
 (def ^:private current-aliases
   "The inbox entry's second copy of the text: the Recipe as it reads *now*, joined
   in under `current_` names. They are `recipes` columns wearing an alias, and the
@@ -498,12 +492,24 @@
   {:current_useful_when :useful_when
    :current_description :description})
 
-(defn- unseal-current-aliases [k p]
+(defn unseal-proposal
+  "A proposal as the inbox and the 409/202 bodies render it: the agent's own text
+  out of `recipe_proposals`, **and** the Recipe's current text beside it, where a
+  shape carries it under a `current_` alias.
+
+  Both halves are here rather than one of them a level up, because this function
+  and its ClojureScript twin have the same name and must mean the same thing. They
+  did not: one undid the aliases and the other left that to its caller. They agreed
+  on every body cookbook sends today — `pending-body` carries no aliases, so only
+  the inbox has them — and would have disagreed the moment a 409 grew one, with the
+  browser reading it and the CLI printing ciphertext, out of two functions a reader
+  would take for the same function."
+  [k p]
   (reduce (fn [p [alias column]]
             (if (contains? p alias)
               (assoc p alias (unseal k :recipes column (get p alias)))
               p))
-          p
+          (unseal-row k :recipe_proposals p)
           current-aliases))
 
 (defn unseal-inbox-entry
@@ -511,8 +517,7 @@
   carries a `proposal`, which holds both texts."
   [k entry]
   (cond-> (unseal-scopes k entry)
-    (map? (:proposal entry))
-    (update :proposal #(->> % (unseal-proposal k) (unseal-current-aliases k)))))
+    (map? (:proposal entry)) (update :proposal #(unseal-proposal k %))))
 
 (defn unseal-body
   "Everything cookbook can answer with, unsealed by shape. One function, so a
