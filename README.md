@@ -299,3 +299,67 @@ described above and not a seal question. So both keep a refusal in front of the
 call, now saying where to go rather than that the feature is missing: publish it
 from the web UI. It is defence in depth on an irreversible act, one round trip
 earlier than the server's own refusal.
+
+## `cookbook-seal-migrate` — the pass that seals a database
+
+`cookbook_seal_migrate.clj` walks the thirteen prose columns of a cookbook
+SQLite file and seals every value that is not sealed already. It is what closes
+the gap between *everything written since the seal landed is sealed* and
+*everything written before it is not*.
+
+```bash
+bb cookbook_seal_migrate.clj --verify  data/cookbook.db   # read-only, exits 1 if broken
+bb cookbook_seal_migrate.clj --dry-run data/cookbook.db   # decide everything, write nothing
+bb cookbook_seal_migrate.clj          data/cookbook.db    # seal
+bb cookbook_seal_migrate.clj --unseal data/cookbook.db    # the escape hatch
+```
+
+It runs from a checkout — it is not one of the installed binaries, because it is
+not a thing anybody runs twice. It needs `sqlite3` on `PATH` and a key, and
+**unlike every other client here it refuses to run without one**: no key means
+sealing off everywhere else, and here that would be a pass that walks the whole
+shelf, writes nothing and reports success.
+
+**Direct SQL, never the HTTP API.** That path compares prose values to decide
+version bumps, writes a history row for each one, flips `has_human_edit` and
+files proposals — so a pass driven through `PUT /api/recipes/:id` would rewrite
+the version ladder in the act of protecting it. The ladder is what `caution`
+reads to say which lines are the owner's.
+
+**It never touches a published Recipe** — not its row, not its history, not its
+proposals. Publishing is a one-way unseal and there is no unpublish, so a
+published Recipe's prose is deliberately in the clear. Scopes are walked whatever
+their Recipes are: a Scope's description is served to no visitor at any `?detail`,
+so it stays the owner's. Thirteen columns here, twelve in the server's publish
+guard.
+
+It prints its counts — sealed, already sealed, blank, published, and anything it
+could not open — because a pass whose output is *done* is a pass nobody can
+check. The header prints the key's **fingerprint**, which is the eight characters
+the web UI's ⚙ panel shows: sealing a database with a key the browser cannot open
+is the one mistake here with no recovery, and comparing eight characters is the
+whole of how to not make it.
+
+A second run changes nothing and says so. One row is one statement is one
+transaction, so a pass killed halfway leaves a legal half-sealed database — mixed
+state is legal permanently, everywhere — and the next run picks up where it
+stopped. Each write carries the values it read in its `WHERE`, so a row that
+moved underneath the pass is reported rather than written over.
+
+### Running it against production
+
+The key is never on fly, so the pass cannot run there. It runs on the owner's
+laptop against a pulled copy, and the sealed file goes back up — a downtime
+cutover, once:
+
+1. **Back the database up, and open the backup.** This is the irreversible step.
+2. Stop writes; pull `/app/data/cookbook.db`.
+3. `--dry-run`, and read the counts.
+4. Seal. Then `--verify`, which must exit 0.
+5. Push it back; start.
+
+Deploy the unseal-capable clients **first** and confirm them live: prefix-driven
+unseal makes the mixed window legal, and the failure mode is a cached old browser
+bundle meeting `enc:v1:…`. Afterwards the backups in `backups/` stop being
+plaintext copies of the shelf — the old tarballs still are, and restoring one
+lands back in plaintext.

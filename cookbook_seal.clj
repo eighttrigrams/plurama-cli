@@ -147,6 +147,30 @@
   []
   (b64-encode (random-bytes key-length)))
 
+(defn fingerprint
+  "Eight hex characters of SHA-256 over the raw key, the same eight the browser's
+  ⚙ panel shows.
+
+  **Not part of the envelope**: nothing is bound to it and no ciphertext carries
+  it. What it is for is telling two things that hold a key that they hold the
+  *same* key, without either of them being able to say what it is — the job an ssh
+  key fingerprint does. Half a truncated hash of 256 bits of entropy identifies a
+  key and helps nobody find one, so it is safe on a settings panel, in a proxy's
+  startup line, and in the header of a migration pass.
+
+  That last one is why it exists at all. Sealing a database with a key the owner's
+  browser cannot open is the one mistake in this whole design with no recovery,
+  and comparing eight characters against the ⚙ panel is the only cheap check that
+  it is not about to happen. A check like that is worthless if the two sides
+  compute it differently, so the answer for the fixture key is in
+  `seal-vectors.edn` under `:key-fingerprint` and both suites assert it — the same
+  treatment `bound-as` and `published-surface` get, and for the same reason."
+  [^javax.crypto.spec.SecretKeySpec k]
+  (->> (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getEncoded k))
+       (take 4)
+       (map #(format "%02x" (bit-and % 0xff)))
+       (str/join)))
+
 (def bound-as
   "Which name a table's values are bound under — the AAD's first half.
 
@@ -202,12 +226,17 @@
   [v]
   (boolean (and (string? v) (str/starts-with? v envelope-prefix))))
 
-(defn- blank-value?
+(defn blank-value?
   "The values rule 1 refuses to seal. `nil`, `\"\"`, and whitespace-only — the last
   of those because cookbook's server refuses a blank `reason` with `str/blank?`,
   and a client that sealed `\" \"` would be defeating that check on the server's
   behalf. Non-strings are left alone too; a number in a prose column is not this
-  function's problem to solve."
+  function's problem to solve.
+
+  Public because the migration walker counts by it. It reports how many values it
+  left alone for being blank, and a walker with its own idea of blank would file a
+  value under *sealed* that `seal` had handed straight back — an audit line
+  disagreeing with what is in the database."
   [v]
   (or (nil? v) (not (string? v)) (str/blank? v)))
 

@@ -76,6 +76,19 @@
                    {:description "clear" :useful_when "clear"
                     :reason (seal/seal k :recipes :reason "why")}))))))
 
+(deftest the-fingerprint-is-the-one-the-fixture-names
+  (testing "the eight characters the ⚙ panel shows and the migration walker prints
+    before it seals a database. They are compared by eye, across two
+    implementations, ahead of the one act here that cannot be undone — so the
+    answer for the fixture key is written down once and both suites assert it.
+    Nothing binds a ciphertext to it; it names a key, it is not part of the
+    envelope."
+    (is (= (:key-fingerprint @fixture) (seal/fingerprint (test-key))))
+    (is (= 8 (count (seal/fingerprint (test-key)))) "four bytes, hex")
+    (is (not= (:key-fingerprint @fixture)
+              (seal/fingerprint (seal/key-from-base64 (:other-key-base64 @fixture))))
+        "and a different key is a different name")))
+
 (deftest a-value-travels-between-the-three-recipe-tables
   (testing "archive! and approve-proposal! copy verbatim and hold no key"
     (let [k (test-key)

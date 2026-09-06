@@ -10,10 +10,16 @@
 ;; `test` is the drift control. It reads the shared vector file out of the
 ;; cookbook checkout beside this one — the same sibling-checkout idiom cookbook's
 ;; own deps.edn uses for us-vs-them — and refuses to pass without it.
+;;
+;; The third suite needs `sqlite3` on PATH rather than a checkout: the migration
+;; walker talks to a database file, so what is worth holding still about it is
+;; what it does to rows. It builds its own database and refuses to pass without
+;; the binary, for the same reason.
 {:paths ["." "test"]
- :tasks {test {:doc "Run the seal suites: the shared test vectors, and the two pure decisions the seal added to plurama_cli."
+ :tasks {test {:doc "Run the seal suites: the shared test vectors, the pure decisions the seal added to plurama_cli, and the migration walker against a database it builds."
                :requires ([clojure.test :as t])
-               :task (do (require 'cookbook-seal-test 'plurama-cli-test)
+               :task (do (require 'cookbook-seal-test 'plurama-cli-test 'cookbook-seal-migrate-test)
                          (let [{:keys [fail error]} (t/run-tests 'cookbook-seal-test
-                                                                 'plurama-cli-test)]
+                                                                 'plurama-cli-test
+                                                                 'cookbook-seal-migrate-test)]
                            (System/exit (if (zero? (+ fail error)) 0 1))))}}}
