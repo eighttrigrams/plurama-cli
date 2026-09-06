@@ -38,21 +38,57 @@
     (is (nil? (prose-in :recipes nil)))
     (is (nil? (prose-in :recipes "not a map")))))
 
+(def ^:private test-key
+  ;; Generated here rather than taken from `seal-vectors.edn`: these are tests
+  ;; about which writes the seal *touches*, not about the envelope, and the one
+  ;; thing they need of a key is that there is one. The fixture is the envelope's
+  ;; drift control and belongs to the suite next door.
+  ;;
+  ;; **Bound explicitly by every test below that needs sealing to be on**, and
+  ;; that is not tidiness. `seal-request-body` returns its body untouched when
+  ;; `@seal-key` is nil, so a suite that let the ambient key decide would pass for
+  ;; the right reason on a box that has one and for no reason at all on a box that
+  ;; does not — and `~/.config/plurama-cli/cookbook-seal.key` has failed to survive
+  ;; the gap between sessions three rounds running. A test that is a coin toss
+  ;; about whether it tested anything is the shape `seal-vectors.edn`'s own header
+  ;; warns about.
+  (delay (seal/key-from-base64 (seal/generate-key-base64))))
+
 (deftest a-prose-less-write-is-returned-byte-identical-and-asks-nothing
   (testing "the guard that keeps a filing PUT from paying for the echo rule.
-    `cfg` and `token` are nil on purpose: if the guard let this through it would
-    try to reach a server with them and throw, so a body coming back unchanged is
-    also the proof that nothing was fetched."
-    (doseq [[path body] [["/recipes/7" "{\"tags\":\"x\"}"]
-                         ["/recipes/7" "{\"scope_ids\":[1,2],\"modified_at\":\"…\"}"]
-                         ["/scopes/3" "{\"title\":\"x\"}"]]]
-      (testing (str path " " body)
-        (is (= body (seal-request-body nil nil :put path body))
-            "the body itself, not a re-serialisation of it"))))
-  (testing "and so is a path the seal has no opinion about"
-    (is (= "{\"description\":\"x\"}"
-           (seal-request-body nil nil :post "/recipes/7/publish" "{\"description\":\"x\"}")))
-    (is (= "{\"seen\":true}" (seal-request-body nil nil :post "/inbox/9/seen" "{\"seen\":true}")))))
+
+    **The read is counted, and that is what makes the second half of the name an
+    assertion.** It used to rest on `cfg` and `token` being nil — *if the guard
+    let this through it would try to reach a server with them and throw* — which
+    was never true: `current-state` catches everything and answers nil, and the
+    bodies below re-serialise to themselves, so removing the guard entirely left
+    this test green. Counting the call is the only thing that can tell whether the
+    round trip happened."
+    (let [asked (atom 0)]
+      (with-redefs [plurama-cli/seal-key test-key
+                    plurama-cli/current-state (fn [& _] (swap! asked inc) nil)]
+        (doseq [[path body] [["/recipes/7" "{\"tags\":\"x\"}"]
+                             ["/recipes/7" "{\"scope_ids\":[1,2],\"modified_at\":\"…\"}"]
+                             ["/scopes/3" "{\"title\":\"x\"}"]]]
+          (testing (str path " " body)
+            (is (= body (seal-request-body nil nil :put path body))
+                "the body itself, not a re-serialisation of it")))
+        (testing "and so is a path the seal has no opinion about"
+          (is (= "{\"description\":\"x\"}"
+                 (seal-request-body nil nil :post "/recipes/7/publish" "{\"description\":\"x\"}")))
+          (is (= "{\"seen\":true}"
+                 (seal-request-body nil nil :post "/inbox/9/seen" "{\"seen\":true}"))))
+        (is (zero? @asked)
+            "and not one of them asked the server anything"))))
+
+  (testing "and with no key configured at all — sealing off, which is cookbook as
+    it was before any of this — every one of them is still the body it was given,
+    by the other road"
+    (with-redefs [plurama-cli/seal-key (delay nil)]
+      (is (= "{\"tags\":\"x\"}" (seal-request-body nil nil :put "/recipes/7" "{\"tags\":\"x\"}")))
+      (is (= "{\"description\":\"x\"}"
+             (seal-request-body nil nil :put "/recipes/7" "{\"description\":\"x\"}"))
+          "including one that carries prose, which is what 'sealing off' means"))))
 
 (deftest the-publish-interlock-asks-the-shared-question
   (testing "not a pair spelled out inline. `refuse-sealed-publish!` and
@@ -91,14 +127,6 @@
 ;; unpublish — so a write to a published Recipe has to go out in the clear or it
 ;; puts `enc:v1:…` back on a public page. Cookbook refuses such a write with a
 ;; 400; this is what keeps an honest agent from meeting that refusal.
-
-(def ^:private test-key
-  ;; Generated here rather than taken from `seal-vectors.edn`: this is a test
-  ;; about the *published rule*, not about the envelope, and the one thing it
-  ;; needs of a key is that there is one. The fixture is the envelope's drift
-  ;; control and belongs to the suite next door.
-  (delay (seal/key-from-base64 (seal/generate-key-base64))))
-
 (deftest a-write-to-a-published-recipe-is-not-sealed
   (let [body "{\"description\":\"a line meant for strangers\"}"]
     (testing "published: the body goes over the wire byte-identical, exactly as a

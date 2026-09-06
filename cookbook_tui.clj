@@ -329,10 +329,21 @@
         ;;
         ;; **No key at all on a published Recipe**, so its prose goes out in the
         ;; clear. Publishing unsealed it one way — a visitor has no key and there
-        ;; is no unpublish — and this tool's write to a published Recipe lands as a
-        ;; *proposal*, which cookbook refuses outright while it carries an
-        ;; envelope. Withholding the key here is what keeps that refusal off an
-        ;; honest agent's path; the refusal is what makes it true anyway.
+        ;; is no unpublish — and cookbook refuses any write that would put an
+        ;; envelope back into a published Recipe, at every door onto its prose.
+        ;; This tool's write to one would land as a *proposal*, which is refused
+        ;; as it is filed rather than at approval, so a sealed one cannot become
+        ;; something the owner is left unable to answer.
+        ;;
+        ;; **Whether this save reaches that refusal at all is doubtful, for a
+        ;; reason that is not the seal's.** `save!` sends no `reason`/`context`,
+        ;; and a machine token — which is what this tool holds — has had to send
+        ;; both on every Recipe write since migration 015, so the PUT is a 400
+        ;; *"a machine write must say why"* before the published rule is reached.
+        ;; That predates all of this (it is known-open item 12 of the steps 1–4
+        ;; report) and is not fixed here. The line below is right either way: it
+        ;; is the rule this tool should follow, and it costs nothing to follow it
+        ;; on a path that may be broken for an unrelated reason.
         {:keys [status body]} (api :put (str "/api/recipes/" (:id recipe))
                                    (seal/seal-recipe-write
                                     (when-not (= 1 (:published recipe)) @seal-key)
