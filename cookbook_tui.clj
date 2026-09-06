@@ -353,15 +353,16 @@
        "  Publishing will unseal it once that is built."))
 
 (defn- sealed-recipe?
-  "Whether the **published surface** of this Recipe is sealed: its description or
-  its useful-when, which are the two fields a visitor is served.
+  "Whether the **published surface** of this Recipe is sealed — which columns those
+  are is `seal/published-surface`, spelled once and asserted against the fixture
+  by both suites, rather than listed inline here and in two other clients.
 
   It reads `:cookbook-seal/stored`, which is what `fetch-recipe` hangs on the row
   — the columns as the database actually holds them, before this tool unsealed
   them for reading. That key is namespaced because nothing here ever sends it:
   every write path builds its body from scratch."
   [{:cookbook-seal/keys [stored]}]
-  (boolean (some seal/sealed? [(:description stored) (:useful_when stored)])))
+  (seal/published-surface-sealed? stored))
 
 (defn- publish!
   "Owner-only, and this tool authenticates as `machine-user`, so a refusal is the

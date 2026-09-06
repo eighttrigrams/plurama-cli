@@ -50,6 +50,32 @@
     (is (= (set (keys seal/sealed-columns)) (set (keys seal/bound-as)))
         "every sealed table has a binding, and nothing else does")))
 
+(deftest the-published-surface-is-the-one-the-fixture-names
+  (testing "three clients implement the publish interlock; one of them widening
+    while another did not is how a sealed column stays reachable through the
+    narrower one. So the pair is in the fixture, like the binding and the
+    inventory, and each client asserts its own list against it."
+    (is (= (:published-surface @fixture) (mapv name seal/published-surface)))
+    (testing "and it is a subset of what is actually sealed"
+      (is (every? (set (:recipes seal/sealed-columns)) seal/published-surface)))
+    (testing "the reason/context pair is not in it — a visitor is served neither"
+      (is (not-any? #{:reason :context} seal/published-surface)))))
+
+(deftest published-surface-sealed?-is-what-the-two-binaries-ask
+  (let [k (test-key)
+        sealed (seal/seal k :recipes :description "a sealed body")
+        sealed-line (seal/seal k :recipes :useful_when "a sealed line")]
+    (is (true? (seal/published-surface-sealed? {:description sealed :useful_when "clear"})))
+    (is (true? (seal/published-surface-sealed? {:description "clear" :useful_when sealed-line}))
+        "a sealed useful-when alone is still a published surface")
+    (is (false? (seal/published-surface-sealed? {:description "clear" :useful_when "clear"})))
+    (is (false? (seal/published-surface-sealed? {}))
+        "fail-open on a row nothing was read for, as the callers document")
+    (testing "and a sealed reason does not make publishing wrong"
+      (is (false? (seal/published-surface-sealed?
+                   {:description "clear" :useful_when "clear"
+                    :reason (seal/seal k :recipes :reason "why")}))))))
+
 (deftest a-value-travels-between-the-three-recipe-tables
   (testing "archive! and approve-proposal! copy verbatim and hold no key"
     (let [k (test-key)

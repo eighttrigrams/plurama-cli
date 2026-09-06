@@ -53,6 +53,19 @@
            (seal-request-body nil nil :post "/recipes/7/publish" "{\"description\":\"x\"}")))
     (is (= "{\"seen\":true}" (seal-request-body nil nil :post "/inbox/9/seen" "{\"seen\":true}")))))
 
+(deftest the-publish-interlock-asks-the-shared-question
+  (testing "not a pair spelled out inline. `refuse-sealed-publish!` and
+    cookbook-tui's `sealed-recipe?` both go through
+    `seal/published-surface-sealed?`, which is asserted against the fixture in
+    the suite next door — so widening the surface in one client cannot leave
+    this one narrower without something going red."
+    (is (= [:description :useful_when] seal/published-surface))
+    (is (true? (seal/published-surface-sealed? {:description "enc:v1:AAAA"})))
+    (is (true? (seal/published-surface-sealed? {:useful_when "enc:v1:AAAA"})))
+    (is (false? (seal/published-surface-sealed? {:description "clear" :useful_when "clear"})))
+    (is (false? (seal/published-surface-sealed? {:reason "enc:v1:AAAA"}))
+        "a sealed reason is not a published surface — a visitor is served none")))
+
 (deftest write-target-names-the-two-tables-a-client-writes
   (is (= {:table :recipes} (write-target "/api/recipes")))
   (is (= {:table :scopes} (write-target "/api/scopes")))

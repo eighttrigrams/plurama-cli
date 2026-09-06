@@ -415,6 +415,27 @@
    :recipe_proposals [:description :useful_when :reason :context]
    :scopes           [:description]})
 
+(def published-surface
+  "The columns a visitor is served, and therefore the ones whose being sealed
+  makes publishing wrong.
+
+  **In the fixture, and asserted by both suites against it**, because the publish
+  interlock is implemented three times — the browser, `cookbook-tui`,
+  `plurama-cli` — and a client that widened its idea of the published surface
+  while another did not would leave a sealed column reachable through the narrower
+  one. That is the shape round 1's finding 4 had: a name promising a guarantee
+  nothing enforced.
+
+  Not `reason`/`context` and not the history: a visitor is served none of them at
+  any `?detail`, so their being sealed is not what makes publishing wrong."
+  [:description :useful_when])
+
+(defn published-surface-sealed?
+  "Whether the two columns a visitor would be served arrived sealed, given the row
+  as the database actually holds it."
+  [stored]
+  (boolean (some #(sealed? (get stored %)) published-surface)))
+
 (defn unseal-row
   "Unseal every sealed column of one row of `table`, leaving every other key
   alone. A key the row does not carry stays absent — cookbook's projections are

@@ -302,10 +302,12 @@
   and there is **no unpublish** — recovery would mean writing the text back out in
   the clear by hand. So a sealed Recipe is refused here, before the call.
 
-  Only the description and the useful-when are asked about: those are the two
-  fields a visitor is served, so those are the two that would appear on a public
-  page as `enc:v1:…`. The reason/context pair and the history are the owner's and
-  are not published at any `?detail`.
+  Which columns are asked about is `seal/published-surface` — the two a visitor
+  is served, so the two that would appear on a public page as `enc:v1:…`. It is
+  named there rather than listed here because this interlock exists in three
+  clients, and one of them widening while another did not is how a sealed column
+  would stay reachable through the narrower one. The reason/context pair and the
+  history are the owner's and are not published at any `?detail`.
 
   **It fails open** if the Recipe cannot be read — a 404, a 401, an unparseable
   body. That is the honest direction here rather than the safe-looking one: this
@@ -318,7 +320,7 @@
   [cfg token id]
   (when-let [k @seal-key]
     (let [stored (stored-columns cfg token {:table :recipes :id id})]
-      (when (some seal/sealed? [(:description stored) (:useful_when stored)])
+      (when (seal/published-surface-sealed? stored)
         (throw (ex-info (str "Recipe " id "'s text is encrypted, and publishing is one way. "
                              "A visitor has no key, so they would meet enc:v1:… on a public "
                              "page with nothing able to undo it. Publishing will unseal it "
