@@ -266,6 +266,46 @@
                :recipes (seal/seal-recipe-write k parsed stored)
                :scopes (seal/seal-scope-write k parsed stored)))))))))
 
+(defn- publish-target
+  "The Recipe id a cookbook publish names, or `nil`. Deliberately a separate
+  matcher from `write-target`: publishing carries no body, so there is nothing to
+  seal — what there is, until step 6 lands, is something to refuse."
+  [path]
+  (when-let [[_ id] (re-matches #"/api/recipes/(\d+)/publish/?"
+                                (-> path (str/split #"\?") first))]
+    (parse-long id)))
+
+(defn- refuse-sealed-publish!
+  "Publishing hands the prose to somebody who has no key and must never have one,
+  and there is **no unpublish** — recovery would mean writing the text back out in
+  the clear by hand. So a sealed Recipe is refused here, before the call.
+
+  Only the description and the useful-when are asked about: those are the two
+  fields a visitor is served, so those are the two that would appear on a public
+  page as `enc:v1:…`. The reason/context pair and the history are the owner's and
+  are not published at any `?detail`.
+
+  **It fails open** if the Recipe cannot be read — a 404, a 401, an unparseable
+  body. That is the honest direction here rather than the safe-looking one: this
+  check reads `/versions`, and a caller who cannot read that is a caller whose
+  publish is about to be refused by the server anyway.
+
+  An interlock, not the feature. Publishing a sealed Recipe should *unseal* it,
+  one way and deliberately, and that is its own piece of work; this is what it
+  replaces when it lands."
+  [cfg token id]
+  (when-let [k @seal-key]
+    (let [stored (stored-columns cfg token {:table :recipes :id id})]
+      (when (some seal/sealed? [(:description stored) (:useful_when stored)])
+        (throw (ex-info (str "Recipe " id "'s text is encrypted, and publishing is one way. "
+                             "A visitor has no key, so they would meet enc:v1:… on a public "
+                             "page with nothing able to undo it. Publishing will unseal it "
+                             "once that is built.")
+                        {:recipe-id id :seal :sealed-publish})))
+      ;; `k` is bound so this reads as what it is: with no key configured there is
+      ;; nothing sealed to protect anybody from.
+      k)))
+
 (defn- unseal-response
   "Every cookbook response, including the ones that are refusals: the 409 naming
   the Recipe that moved and the 409 naming a pending proposal both carry prose,
@@ -420,6 +460,9 @@
                   (when login-auth? (or (cached-token app) (login! app cfg))))
         ;; Cookbook only, and only on a write that carries prose. Sealing needs
         ;; the token, so it happens here rather than beside `read-body` above.
+        _ (when-let [id (and (cookbook? app) (= :post method)
+                             (publish-target (resolve-path path)))]
+            (refuse-sealed-publish! cfg token id))
         req (cond-> req
               (cookbook? app) (update :body #(seal-request-body cfg token method path %)))
         resp (let [r (send-request cfg token req)]

@@ -338,6 +338,27 @@
                  (str "Saved as v" (:version body) ".")))
       (println (refusal status body :write)))))
 
+(def ^:private sealed-publish-refusal
+  "Publishing hands the prose to somebody who has no key and must never have one,
+  and there is no unpublish to take it back — recovery would mean writing the text
+  out in the clear by hand. So a sealed Recipe is refused here, before the
+  confirmation, rather than after an irreversible call.
+
+  An interlock, not the feature: publishing a sealed Recipe should *unseal* it,
+  one way and deliberately, and that is its own piece of work. This is what that
+  replaces when it lands."
+  (str "Refused: this Recipe's text is encrypted.\n"
+       "  Publishing is one way, and a visitor has no key — they would meet\n"
+       "  enc:v1:… on a public page with nothing able to undo it.\n"
+       "  Publishing will unseal it once that is built."))
+
+(defn- sealed-recipe?
+  "Whether the **published surface** of this Recipe is sealed: its description or
+  its useful-when, which are the two fields a visitor is served. `:sealed` is the
+  body as the columns actually hold it, before this tool unsealed it for reading."
+  [{:cookbook-seal/keys [stored]}]
+  (boolean (some seal/sealed? [(:description stored) (:useful_when stored)])))
+
 (defn- publish!
   "Owner-only, and this tool authenticates as `machine-user`, so a refusal is the
   expected outcome rather than a fault. It is offered anyway: attempting it and
@@ -345,17 +366,20 @@
   whether machines may ever publish. The confirmation is here because the latch
   is one-way — there is no unpublish, on the server or anywhere else."
   [recipe]
-  (println (str "Publishing Recipe " (:id recipe) " — \"" (:title recipe) "\""))
-  (println "  It becomes readable by anyone who opens Cookbook, and you have put")
-  (println "  your name to it. There is no unpublish.")
-  (println "  Note: publishing is the owner's; this tool signs in as machine-user")
-  (println "  and expects to be refused.")
-  (if-not (= "publish" (prompt "Type 'publish' to confirm: "))
-    (println "Cancelled — nothing was written.")
-    (let [{:keys [status body]} (api :post (str "/api/recipes/" (:id recipe) "/publish"))]
-      (if (= 200 status)
-        (println (str "Published at " (:published_at body) "."))
-        (println (refusal status body :publish))))))
+  (if (sealed-recipe? recipe)
+    (println sealed-publish-refusal)
+    (do
+      (println (str "Publishing Recipe " (:id recipe) " — \"" (:title recipe) "\""))
+      (println "  It becomes readable by anyone who opens Cookbook, and you have put")
+      (println "  your name to it. There is no unpublish.")
+      (println "  Note: publishing is the owner's; this tool signs in as machine-user")
+      (println "  and expects to be refused.")
+      (if-not (= "publish" (prompt "Type 'publish' to confirm: "))
+        (println "Cancelled — nothing was written.")
+        (let [{:keys [status body]} (api :post (str "/api/recipes/" (:id recipe) "/publish"))]
+          (if (= 200 status)
+            (println (str "Published at " (:published_at body) "."))
+            (println (refusal status body :publish))))))))
 
 (defn- versions [id]
   (let [{:keys [status body]} (api :get (str "/api/recipes/" id "/versions"))]
