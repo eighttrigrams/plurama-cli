@@ -270,24 +270,47 @@
   "Write one value into one column, under all three rules.
 
   `stored` is what that column holds right now — the ciphertext this client read
-  a moment ago, or a plaintext on a shelf not yet migrated, or `nil` for a row
-  that does not exist yet. When the new plaintext is what `stored` already says,
-  `stored` is handed back byte for byte, so the server's value comparison still
-  sees 'unchanged'. Anything genuinely new gets a fresh nonce, so two Recipes
-  saying the same sentence still seal differently.
+  a moment ago, a plaintext on a row not yet migrated, or `nil` for a row that
+  does not exist yet.
 
-  A `stored` that cannot be opened — wrong key, tampered — is treated as *not
-  matching* rather than as an error. Refusing the write would leave a client
-  holding the only copy of the new text with nowhere to put it."
+  **When the value has not changed, `stored` comes back byte for byte, whichever
+  of those two it is.** That is what keeps the server's `content-would-change?`
+  answering *no-op* to a write that changed nothing, and with it the version, the
+  history row and — for a machine write — the difference between a direct write
+  and a proposal.
+
+  The plaintext half of that rule is not an optimisation, it is the mixed-state
+  window the rollout mandates: clients are deployed first and the data is sealed
+  later, so for a while every row is unmigrated. Sealing an unchanged plaintext
+  there would make an agent's idempotent re-`PUT` a version bump, a history row
+  and an inbox entry — audit note A's corruption arriving through the very door
+  the echo rule was built to close. So an unchanged value on an unmigrated row
+  stays plaintext, and the row seals on its next real edit.
+
+  **A migration pass must therefore pass `nil` as `stored`**, and this is the one
+  place that trap is written down: a walker that handed the plaintext it just
+  read in as `stored` would be told, correctly, that nothing changed, and would
+  seal nothing at all.
+
+  A `stored` that will not open is treated as *not matching* rather than as an
+  error: refusing the write would leave a client holding the only copy of the new
+  text with nowhere to put it."
   ([k table column v] (seal k table column v nil))
   ([k table column v stored]
    (cond
      (nil? k) v
      (blank-value? v) v
+
+     ;; Unchanged on a sealed row: hand back the very bytes already there.
      (and (sealed? stored)
           (= v (try (unseal-text k (aad table column) stored)
                     (catch Exception _ ::unreadable))))
      stored
+
+     ;; Unchanged on a row nobody has migrated yet: leave it alone.
+     (and (string? stored) (not (sealed? stored)) (= v stored))
+     stored
+
      :else (seal-text k (aad table column) v))))
 
 ;; ---------------------------------------------------------------------------

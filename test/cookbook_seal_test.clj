@@ -165,14 +165,20 @@
     (is (not= stored out))
     (is (= "The new text." (seal/unseal k :recipes :description out)))))
 
-(deftest a-stored-plaintext-echoes-nothing-and-seals-cleanly
-  (testing "the half-migrated shelf: the column holds plain text, not an envelope"
+(deftest an-unchanged-value-on-an-unmigrated-row-stays-plaintext
+  (testing "the mixed-state window: clients deployed first, data sealed later"
     (let [k (test-key)
-          out (seal/seal k :recipes :description "unchanged since before the migration"
-                         "unchanged since before the migration")]
-      (is (seal/sealed? out) "there is no stored ciphertext to echo, so it seals")
-      (is (= "unchanged since before the migration"
-             (seal/unseal k :recipes :description out))))))
+          text "unchanged since before the migration"]
+      (is (= text (seal/seal k :recipes :description text text))
+          "a no-op stays a no-op — the server sees the same value and writes no version")
+      (is (not (seal/sealed? (seal/seal k :recipes :description text text)))
+          "and the row is left as it was, to seal on its next real edit")
+      (testing "a real edit on the same row does seal"
+        (let [out (seal/seal k :recipes :description "edited at last" text)]
+          (is (seal/sealed? out))
+          (is (= "edited at last" (seal/unseal k :recipes :description out)))))
+      (testing "and a migration pass, which passes no stored, seals it"
+        (is (seal/sealed? (seal/seal k :recipes :description text)))))))
 
 (deftest no-key-means-no-sealing
   (testing "cookbook's behaviour before any of this existed, reachable by config"
