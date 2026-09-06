@@ -206,18 +206,32 @@
     (.init (int mode) k (javax.crypto.spec.GCMParameterSpec. tag-bits nonce))
     (.updateAAD (utf8 aad-str))))
 
+(defn seal-text-with-nonce
+  "**The fixture's arity, and nothing else's** — which is why it has a name you
+  have to type rather than an overload you can fall into.
+
+  A nonce supplied by a caller is a nonce that can be supplied twice, and in GCM
+  two values sealed under one key and one nonce is not a weakening, it is a total
+  break: the keystream cancels between them and the authentication key itself
+  falls out. Nothing in this application has any reason to choose one. The test
+  vectors do, because pinning an exact ciphertext is the whole point of them.
+
+  Every other caller wants `seal-text`, which takes one from the CSPRNG."
+  [k aad-str ^String plaintext ^bytes nonce]
+  (let [c (cipher javax.crypto.Cipher/ENCRYPT_MODE k nonce aad-str)
+        body (.doFinal c (utf8 plaintext))
+        out (byte-array (+ (alength nonce) (alength ^bytes body)))]
+    (System/arraycopy nonce 0 out 0 (alength nonce))
+    (System/arraycopy body 0 out (alength nonce) (alength ^bytes body))
+    (str envelope-prefix (b64-encode out))))
+
 (defn seal-text
   "The envelope itself: plaintext in, `enc:v1:…` out. No rules, no inventory, no
-  opinion about blanks — `seal` below is what call sites use. Separate so the
-  fixture can pin an exact ciphertext by handing in the nonce it wants."
-  ([k aad-str plaintext] (seal-text k aad-str plaintext (random-bytes nonce-length)))
-  ([k aad-str ^String plaintext ^bytes nonce]
-   (let [c (cipher javax.crypto.Cipher/ENCRYPT_MODE k nonce aad-str)
-         body (.doFinal c (utf8 plaintext))
-         out (byte-array (+ (alength nonce) (alength ^bytes body)))]
-     (System/arraycopy nonce 0 out 0 (alength nonce))
-     (System/arraycopy body 0 out (alength nonce) (alength ^bytes body))
-     (str envelope-prefix (b64-encode out)))))
+  opinion about blanks — `seal` below is what call sites use.
+
+  A fresh 96-bit nonce per value, from the CSPRNG, every time."
+  [k aad-str plaintext]
+  (seal-text-with-nonce k aad-str plaintext (random-bytes nonce-length)))
 
 (defn unseal-text
   "The inverse, for a value known to carry the prefix. Throws when the tag does

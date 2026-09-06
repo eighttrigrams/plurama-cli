@@ -66,7 +66,7 @@
   (let [k (test-key)]
     (doseq [{:keys [name aad nonce plaintext sealed]} (:vectors @fixture)]
       (testing name
-        (is (= sealed (seal/seal-text k aad plaintext (b64-decode nonce)))
+        (is (= sealed (seal/seal-text-with-nonce k aad plaintext (b64-decode nonce)))
             "same key, same nonce, same AAD must give the same envelope")))))
 
 (deftest every-vector-unseals-back-to-its-plaintext
@@ -99,6 +99,18 @@
       (testing (pr-str v)
         (is (= v (seal/unseal k :recipes :description v)))
         (is (false? (seal/sealed? v)))))))
+
+(deftest a-prefixed-value-that-will-not-open-is-handed-back-not-thrown
+  (testing "rule 3 is about the prefix, and the prefix is not a promise that it opens"
+    (let [k (test-key)]
+      (doseq [v (:unopenable @fixture)]
+        (testing (pr-str v)
+          (is (= v (seal/unseal k :recipes :description v))
+              "handed back, not thrown: one bad value must not cost a whole response")
+          (testing "and it does not fail a write either"
+            (let [out (seal/seal k :recipes :description "the new text" v)]
+              (is (seal/sealed? out))
+              (is (= "the new text" (seal/unseal k :recipes :description out))))))))))
 
 (deftest a-tampered-envelope-fails-to-open
   (doseq [{:keys [name aad sealed key-base64]} (:tamper @fixture)]
