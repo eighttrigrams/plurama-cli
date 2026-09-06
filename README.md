@@ -244,6 +244,13 @@ Three things are worth knowing:
   `null` — cookbook needs *not recorded* and *recorded, and nothing* to go on
   meaning different things, and the server's own check that a machine write says
   why still has a blank to see.
+- **An unchanged value is written back byte for byte, whichever encoding it is
+  in** — the stored ciphertext on a sealed row, the stored plaintext on one
+  nobody has migrated yet, and the unopenable envelope on a row this key does not
+  open. A no-op stays a no-op in all three, which is what keeps the server from
+  writing a version for it. If you are writing the migration pass, note the
+  corollary: **it must pass no `stored` at all**, or it will be told that nothing
+  has changed and will seal nothing.
 
 ### The one thing that is not there yet
 
