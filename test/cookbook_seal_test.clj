@@ -237,6 +237,19 @@
     (doseq [[_ columns] seal/sealed-columns]
       (is (not-any? #{:title :tags} columns)))))
 
+(deftest the-inventory-is-the-one-the-fixture-names
+  (testing "the list above is spelled out because it is the thing being asserted;
+    what makes the *clients* agree about it is the fixture, the way it already
+    does for the binding and the published surface. Since publishing became a
+    one-way unseal there is a third reader: cookbook's server walks the twelve
+    Recipe columns of this inventory — with no key, on the prefix alone — before
+    it will let a publish latch, and a server whose list was narrower than this
+    one would let a sealed value ride out onto a public page through the column
+    it did not know to look at."
+    (is (= (:sealed-columns @fixture)
+           (into {} (for [[table columns] seal/sealed-columns]
+                      [table (mapv name columns)]))))))
+
 (deftest a-lean-row-gains-no-keys
   (testing "cookbook's listing carries no description at all, and must not grow one"
     (let [k (test-key)

@@ -284,7 +284,18 @@ above, on `cookbook_seal.clj`). Until that is done, an agent reading a sealed
 Recipe here is told nothing about which lines are the owner's, where the browser
 is told everything. That is a real gap and it is named rather than papered over.
 
-Publishing is the other thing not yet there: a sealed Recipe published would
-hand a visitor `enc:v1:…`, and there is no unpublish. Both binaries here refuse
-to publish one, with a message saying so — an interlock until publishing learns
-to unseal.
+### Publishing a sealed Recipe: the owner's browser, and only it
+
+Publishing **unseals**. The publisher reads what the Recipe's trail still holds
+in ciphertext (`GET /api/recipes/:id/sealed`), opens all of it with the key it
+has, and hands the plaintext back with the publish; the server writes it in
+place and sets the latch in one transaction, refusing the lot if an envelope
+would remain. There is no unpublish, so it happens once and it is permanent.
+
+**Neither binary here can do that, and neither should.** Both sign in as
+`machine-user`, and cookbook refuses a machine publish with a 403 whatever it
+carries — publishing is an act of taking ownership, which is the boundary
+described above and not a seal question. So both keep a refusal in front of the
+call, now saying where to go rather than that the feature is missing: publish it
+from the web UI. It is defence in depth on an irreversible act, one round trip
+earlier than the server's own refusal.

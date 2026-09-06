@@ -340,17 +340,19 @@
 
 (def ^:private sealed-publish-refusal
   "Publishing hands the prose to somebody who has no key and must never have one,
-  and there is no unpublish to take it back — recovery would mean writing the text
-  out in the clear by hand. So a sealed Recipe is refused here, before the
-  confirmation, rather than after an irreversible call.
+  and there is no unpublish to take it back. So a sealed Recipe is refused here,
+  before the confirmation, rather than after an irreversible call.
 
-  An interlock, not the feature: publishing a sealed Recipe should *unseal* it,
-  one way and deliberately, and that is its own piece of work. This is what that
-  replaces when it lands."
+  **Publishing a sealed Recipe unseals it since step 6 — but not from here.** The
+  unseal is done by whoever publishes, out of the key they hold, and this tool
+  holds a key for *reading*: it signs in as `machine-user`, and cookbook refuses a
+  machine publish with a 403 whatever it sends. The owner's browser is the one
+  surface that can do it. So this says where to go rather than that the feature is
+  missing, which is what it used to say."
   (str "Refused: this Recipe's text is encrypted.\n"
-       "  Publishing is one way, and a visitor has no key — they would meet\n"
-       "  enc:v1:… on a public page with nothing able to undo it.\n"
-       "  Publishing will unseal it once that is built."))
+       "  Publishing unseals a Recipe, and it is the owner who publishes:\n"
+       "  cookbook refuses a machine publish outright, sealed or not.\n"
+       "  Publish it from the web UI."))
 
 (defn- sealed-recipe?
   "Whether the **published surface** of this Recipe is sealed — which columns those

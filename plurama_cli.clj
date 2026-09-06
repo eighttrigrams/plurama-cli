@@ -205,8 +205,9 @@
 (defn- write-target
   "Which table a cookbook write is aimed at, and at which row — `nil` for
   everything else, which is most of the API. `/recipes/7/publish` is deliberately
-  not matched: it carries no body, and after step 6 it is an unseal rather than a
-  seal."
+  not matched: what it can carry is an *unseal* — plaintext going back over
+  ciphertext — which is the opposite of what this function is for, and which no
+  caller from here may make anyway."
   [path]
   (let [p (-> path (str/split #"\?") first (str/replace #"/$" ""))
         id #(parse-long (last (str/split % #"/")))]
@@ -290,8 +291,8 @@
 
 (defn- publish-target
   "The Recipe id a cookbook publish names, or `nil`. Deliberately a separate
-  matcher from `write-target`: publishing carries no body, so there is nothing to
-  seal — what there is, until step 6 lands, is something to refuse."
+  matcher from `write-target`: a publish from here carries no body worth sealing —
+  what it carries, on a sealed Recipe, is something to refuse."
   [path]
   (when-let [[_ id] (re-matches #"/api/recipes/(\d+)/publish/?"
                                 (-> path (str/split #"\?") first))]
@@ -314,17 +315,24 @@
   check reads `/versions`, and a caller who cannot read that is a caller whose
   publish is about to be refused by the server anyway.
 
-  An interlock, not the feature. Publishing a sealed Recipe should *unseal* it,
-  one way and deliberately, and that is its own piece of work; this is what it
-  replaces when it lands."
+  **Defence in depth, and it is now the third refusal on the same act.**
+  Publishing a sealed Recipe *does* unseal it since step 6 — the owner's browser
+  reads GET /api/recipes/:id/sealed, opens every envelope in the Recipe's trail
+  and hands the plaintext back with the publish, in one transaction. But that is
+  the browser's alone: this tool signs in as `machine-user`, and cookbook refuses
+  a machine publish with a 403 whatever it carries, sealed or not
+  (`wrap-machine-recipe-rules`). The server also refuses any publish that would
+  leave an envelope behind, whoever asks. So this check cannot be the only thing
+  standing between a sealed Recipe and a public page, and it is not written as
+  though it were — what it buys is a clearer sentence one round trip earlier."
   [cfg token id]
   (when-let [k @seal-key]
     (let [stored (stored-columns cfg token {:table :recipes :id id})]
       (when (seal/published-surface-sealed? stored)
         (throw (ex-info (str "Recipe " id "'s text is encrypted, and publishing is one way. "
-                             "A visitor has no key, so they would meet enc:v1:… on a public "
-                             "page with nothing able to undo it. Publishing will unseal it "
-                             "once that is built.")
+                             "Publishing unseals a Recipe, and only the owner's browser "
+                             "holds a key to unseal it with — cookbook refuses a machine "
+                             "publish outright. Publish it from the web UI.")
                         {:recipe-id id :seal :sealed-publish})))
       ;; `k` is bound so this reads as what it is: with no key configured there is
       ;; nothing sealed to protect anybody from.
