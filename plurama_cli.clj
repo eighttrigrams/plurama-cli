@@ -248,6 +248,16 @@
                               (select-keys [:description]))))))
       (catch Exception _ nil))))
 
+(defn- prose-in
+  "The sealed columns a parsed write body actually carries, or `nil`. Pure, and a
+  function of its own so that a suite can hold it still: it is what decides
+  whether a write pays for the echo rule's extra read, and getting it wrong in
+  either direction is invisible — too wide and a filing PUT fetches a version
+  ladder it discards, too narrow and a prose write goes out unsealed."
+  [table parsed]
+  (when (map? parsed)
+    (seq (filter #(contains? parsed %) (get seal/sealed-columns table)))))
+
 (defn- seal-request-body
   "Seal the prose of a cookbook write. Everything else — the title, the tags, the
   Scope ids, `modified_at` — goes as it was given, because it is what the search
@@ -269,11 +279,8 @@
         target (when (#{:post :put} method) (write-target (resolve-path path)))]
     (if-not (and k target body)
       body
-      (let [parsed (try (json/parse-string body true) (catch Exception _ nil))
-            prose (when (map? parsed)
-                    (seq (filter #(contains? parsed %)
-                                 (get seal/sealed-columns (:table target)))))]
-        (if-not prose
+      (let [parsed (try (json/parse-string body true) (catch Exception _ nil))]
+        (if-not (prose-in (:table target) parsed)
           body
           (let [stored (stored-columns cfg token target)]
             (json/generate-string
