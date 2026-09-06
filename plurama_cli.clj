@@ -217,22 +217,38 @@
       (re-matches #"/api/recipes/\d+" p) {:table :recipes :id (id p)}
       (re-matches #"/api/scopes/\d+" p)  {:table :scopes  :id (id p)})))
 
-(defn- stored-columns
-  "What that row's sealed columns hold **right now**, so a value the caller did
-  not change can be written back as the very ciphertext already stored. Without
-  it, a fresh nonce makes every resend look like a change to the server, and an
-  agent that PUTs the same text twice piles up versions, history rows and inbox
-  entries — corrupting the ladder the seal exists to protect.
+(defn- current-state
+  "What the seal needs to know about the row a write is aimed at, out of **one**
+  read: `:stored`, and `:published?`.
+
+  `:stored` is what that row's sealed columns hold **right now**, so a value the
+  caller did not change can be written back as the very ciphertext already stored.
+  Without it, a fresh nonce makes every resend look like a change to the server,
+  and an agent that PUTs the same text twice piles up versions, history rows and
+  inbox entries — corrupting the ladder the seal exists to protect.
+
+  `:published?` is the *other* rule, and it arrived with publish-as-unseal:
+  publishing opens every envelope in a Recipe, one way, because a visitor has no
+  key and there is no unpublish — so a write to a published Recipe must go out in
+  the clear or it puts `enc:v1:…` back on a public page. Cookbook refuses such a
+  write with a 400, so this is the honest path rather than the guarantee.
 
   A Recipe's is read from `/versions` and **not** from `?detail=full`, which is
   the whole reason this is reachable at all: a full read counts as a consumption
   and ranks the shelf, so seal bookkeeping would quietly reorder the owner's
-  Cookbook. `/versions` carries all four columns of the current row and counts
-  nothing.
+  Cookbook. `/versions` carries all four columns of the current row, says whether
+  the Recipe is published, and counts nothing. Both facts out of the read that was
+  already being made is why the second rule costs no round trip.
+
+  A Scope has no latch — the projection that hides a Scope's prose from a visitor
+  is not the publish latch — so `:published?` is always false there.
 
   Anything that goes wrong here — a 404, a 401, a body that will not parse —
-  yields `nil`, which means *nothing to echo* and a fresh seal. That is the safe
-  direction: a redundant version is a wart, and a refused write is a lost one."
+  yields `nil` for both, which means *nothing to echo* and a fresh seal. That is
+  the safe direction for the echo rule: a redundant version is a wart, and a
+  refused write is a lost one. It is the *unsafe* direction for the published
+  rule, and deliberately: a client that cannot read the Recipe cannot know, and
+  the server refuses what this would get wrong."
   [cfg token {:keys [table id]}]
   (when id
     (try
@@ -243,10 +259,12 @@
         (when (= 200 (:status resp))
           (let [parsed (json/parse-string (:body resp) true)]
             (case table
-              :recipes (some-> (->> parsed :versions (filter :current) first)
-                               (select-keys [:description :useful_when :reason :context]))
-              :scopes (some-> (->> parsed (filter #(= id (:id %))) first)
-                              (select-keys [:description]))))))
+              :recipes {:stored (some-> (->> parsed :versions (filter :current) first)
+                                        (select-keys [:description :useful_when :reason :context]))
+                        :published? (= 1 (:published parsed))}
+              :scopes {:stored (some-> (->> parsed (filter #(= id (:id %))) first)
+                                       (select-keys [:description]))
+                       :published? false}))))
       (catch Exception _ nil))))
 
 (defn- prose-in
@@ -283,11 +301,19 @@
       (let [parsed (try (json/parse-string body true) (catch Exception _ nil))]
         (if-not (prose-in (:table target) parsed)
           body
-          (let [stored (stored-columns cfg token target)]
-            (json/generate-string
-             (case (:table target)
-               :recipes (seal/seal-recipe-write k parsed stored)
-               :scopes (seal/seal-scope-write k parsed stored)))))))))
+          (let [{:keys [stored published?]} (current-state cfg token target)]
+            ;; **A published Recipe's prose goes out in the clear**, and the body
+            ;; goes over the wire byte-identical, exactly as a prose-less one does
+            ;; above. Publishing unsealed the Recipe one way — a visitor has no key
+            ;; and there is no unpublish — so sealing it again would put `enc:v1:…`
+            ;; back on a public page. Cookbook refuses the write anyway; this is
+            ;; what keeps an honest agent from meeting that refusal.
+            (if published?
+              body
+              (json/generate-string
+               (case (:table target)
+                 :recipes (seal/seal-recipe-write k parsed stored)
+                 :scopes (seal/seal-scope-write k parsed stored))))))))))
 
 (defn- publish-target
   "The Recipe id a cookbook publish names, or `nil`. Deliberately a separate
@@ -327,7 +353,7 @@
   though it were — what it buys is a clearer sentence one round trip earlier."
   [cfg token id]
   (when-let [k @seal-key]
-    (let [stored (stored-columns cfg token {:table :recipes :id id})]
+    (let [{:keys [stored]} (current-state cfg token {:table :recipes :id id})]
       (when (seal/published-surface-sealed? stored)
         (throw (ex-info (str "Recipe " id "'s text is encrypted, and publishing is one way. "
                              "Publishing unseals a Recipe, and only the owner's browser "

@@ -10,6 +10,7 @@
   a prose column dropped from the inventory here would send prose out in the clear
   and nothing would say so."
   (:require [clojure.test :refer [deftest is testing]]
+            [cheshire.core :as json]
             [cookbook-seal :as seal]
             [plurama-cli]))
 
@@ -82,3 +83,43 @@
   (is (nil? (publish-target "/api/recipes/7")))
   (is (nil? (publish-target "/api/recipes")))
   (is (nil? (publish-target "/api/inbox/7/approve"))))
+
+;; ---------------------------------------------------------------------------
+;; The published rule
+;;
+;; Publishing a Recipe unseals it, one way — a visitor has no key and there is no
+;; unpublish — so a write to a published Recipe has to go out in the clear or it
+;; puts `enc:v1:…` back on a public page. Cookbook refuses such a write with a
+;; 400; this is what keeps an honest agent from meeting that refusal.
+
+(def ^:private test-key
+  ;; Generated here rather than taken from `seal-vectors.edn`: this is a test
+  ;; about the *published rule*, not about the envelope, and the one thing it
+  ;; needs of a key is that there is one. The fixture is the envelope's drift
+  ;; control and belongs to the suite next door.
+  (delay (seal/key-from-base64 (seal/generate-key-base64))))
+
+(deftest a-write-to-a-published-recipe-is-not-sealed
+  (let [body "{\"description\":\"a line meant for strangers\"}"]
+    (testing "published: the body goes over the wire byte-identical, exactly as a
+      prose-less one does — no envelope, no re-serialisation"
+      (with-redefs [plurama-cli/seal-key test-key
+                    plurama-cli/current-state (fn [_ _ _] {:stored nil :published? true})]
+        (is (= body (seal-request-body nil nil :put "/recipes/7" body)))))
+
+    (testing "and unpublished it is sealed, which is the whole point of the shelf"
+      (with-redefs [plurama-cli/seal-key test-key
+                    plurama-cli/current-state (fn [_ _ _] {:stored nil :published? false})]
+        (let [out (json/parse-string (seal-request-body nil nil :put "/recipes/7" body) true)]
+          (is (seal/sealed? (:description out)))
+          (is (= "a line meant for strangers"
+                 (seal/unseal @test-key :recipes :description (:description out)))))))
+
+    (testing "a read that failed answers neither, and the write seals: that is the
+      safe direction for the echo rule and the unsafe one for this rule, on
+      purpose — a client that cannot read the Recipe cannot know, and the server
+      refuses what this would get wrong"
+      (with-redefs [plurama-cli/seal-key test-key
+                    plurama-cli/current-state (fn [_ _ _] nil)]
+        (let [out (json/parse-string (seal-request-body nil nil :put "/recipes/7" body) true)]
+          (is (seal/sealed? (:description out))))))))

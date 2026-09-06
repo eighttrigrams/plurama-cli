@@ -326,9 +326,16 @@
         ;; started from. An unchanged field goes back as the same bytes, so the
         ;; server's own comparison still answers "nothing changed" — which is what
         ;; the line below prints.
+        ;;
+        ;; **No key at all on a published Recipe**, so its prose goes out in the
+        ;; clear. Publishing unsealed it one way — a visitor has no key and there
+        ;; is no unpublish — and this tool's write to a published Recipe lands as a
+        ;; *proposal*, which cookbook refuses outright while it carries an
+        ;; envelope. Withholding the key here is what keeps that refusal off an
+        ;; honest agent's path; the refusal is what makes it true anyway.
         {:keys [status body]} (api :put (str "/api/recipes/" (:id recipe))
                                    (seal/seal-recipe-write
-                                    @seal-key
+                                    (when-not (= 1 (:published recipe)) @seal-key)
                                     {:title title :useful_when useful :description body
                                      :modified_at (:modified_at recipe)}
                                     (:cookbook-seal/stored recipe)))]
