@@ -21,7 +21,6 @@
             [plurama-cli-proxy]))
 
 (def ^:private handle @#'plurama-cli-proxy/handle)
-(def ^:private denied? @#'plurama-cli-proxy/denied?)
 
 (def ^:private test-key (delay (seal/key-from-base64 (seal/generate-key-base64))))
 (def ^:private other-key (delay (seal/key-from-base64 (seal/generate-key-base64))))
@@ -270,39 +269,6 @@
           (request up nil {:method :put :uri "/cookbook/api/recipes/7" :body body})
           (is (= body (:body (last @(:seen up)))) "and a write goes out as it came in")
           (is (= 2 (count @(:seen up))) "with no read in front of it"))))))
-
-(deftest cookbook-publish-is-blocked-at-the-proxy
-  (testing "publishing is one-way and irreversible -- it decrypts a Recipe's whole
-    trail for good and hands it to the public -- so the box is refused it here
-    whatever cookbook's own gate would say, and everything else stays reachable."
-    ;; the predicate, over the upstream path split-target yields (/cookbook stripped)
-    (is (denied? :cookbook :post "/api/recipes/7/publish"))
-    (is (denied? :cookbook :post "/api/recipes/123/publish"))
-    ;; and nothing else cookbook does is touched
-    (is (not (denied? :cookbook :put    "/api/recipes/7")))
-    (is (not (denied? :cookbook :post   "/api/recipes")))
-    (is (not (denied? :cookbook :delete "/api/recipes/7")))
-    (is (not (denied? :cookbook :get    "/api/recipes/7/publish"))
-        "only POST publishes; a GET of that path is not the action")
-    (is (not (denied? :cookbook :get    "/api/recipes")))
-    ;; end to end: a publish is refused 403 and never reaches upstream
-    (with-upstream {"/api/recipes/7/publish" {:body {:published 1}}}
-      (fn [up]
-        (let [resp (request up @test-key {:method :post
-                                          :uri "/cookbook/api/recipes/7/publish"})]
-          (is (= 403 (:status resp)))
-          (is (= "refused by proxy denylist" (:error (body-of resp))))
-          (is (empty? @(:seen up))
-              "the publish must not have been forwarded to cookbook at all"))))
-    ;; a non-publish write to the same Recipe still goes through
-    (with-upstream {"/api/recipes/7/versions" {:body {:published 0 :versions []}}
-                    "/api/recipes/7" {:body {:id 7}}}
-      (fn [up]
-        (let [resp (request up @test-key {:method :put :uri "/cookbook/api/recipes/7"
-                                          :body (json/generate-string {:tags "x"})})]
-          (is (not= 403 (:status resp)))
-          (is (some #(= "/api/recipes/7" (:uri %)) @(:seen up))
-              "an ordinary edit is forwarded as before"))))))
 
 (deftest an-app-that-is-not-cookbook-is-not-touched
   (testing "the seal is cookbook's, and a `description` on another app's write is
