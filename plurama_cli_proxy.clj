@@ -272,11 +272,17 @@
 (defn- seal-outgoing
   "A cookbook write, sealed on the way past. Answers
 
-    `nil`                       — nothing to do; forward what arrived, byte for byte
-    `{:body … :sealed n}`       — forward this instead; `n` is how many prose
-                                  columns left sealed that did not arrive sealed,
-                                  which is what the audit line reports
-    `{:refused [columns]}`      — do not forward at all
+    `nil`                          — nothing to do; forward what arrived, byte for byte
+    `{:body … :sealed n :echoed m}` — forward this instead
+    `{:refused [columns]}`         — do not forward at all
+
+  **`:sealed` and `:echoed` are counted apart**, and that is the audit trail
+  earning its name. Both are columns that left sealed and did not arrive sealed,
+  which is one number — and one number cannot tell a real edit from an idempotent
+  resend, since a no-op write also leaves four plaintext fields as four
+  ciphertexts. `:echoed` is the ones handed back byte-identical to what the row
+  already held, so *the echo rule fired* becomes something the log can be read
+  for rather than something only a version number can prove. Found in review.
 
   A body with no prose in it is the first of those and **asks the server
   nothing**: without that guard a filing PUT of `{\"tags\":\"x\"}` would drag down
@@ -291,13 +297,18 @@
               {:refused foreign}
               (when-let [sealed (seal/seal-write k target parsed state)]
                 (when-not (= sealed parsed)
-                  {:body (json/generate-string sealed)
-                   :sealed (count (remove (fn [[c v]] (= v (get parsed c))) sealed))})))))))))
+                  (let [moved (remove (fn [[c v]] (= v (get parsed c))) sealed)]
+                    {:body (json/generate-string sealed)
+                     :sealed (count (remove (fn [[c v]] (= v (get stored c))) moved))
+                     :echoed (count (filter (fn [[c v]] (= v (get stored c))) moved))}))))))))))
 
 (defn- unseal-incoming
-  "A cookbook response, opened on the way back. `{:body … :opened n}` when
-  anything changed, `nil` when nothing did — including every response on a box
-  with no key configured, which then goes back byte for byte.
+  "A cookbook response, opened on the way back. `{:body …}` when anything changed,
+  `nil` when nothing did — including every response on a box with no key
+  configured, which then goes back byte for byte. The audit line reports *that* it
+  was opened and not how much of it, because a count of opened fields is a
+  description of the response's shape and the shape is the caller's business, not
+  the log's.
 
   Error bodies are opened too, and deliberately: the 409 naming the Recipe that
   moved and the 409 naming a pending proposal both carry prose, and an agent
@@ -424,11 +435,14 @@
                              (forward cfg (login! app cfg) req)
                              r))
                     opened (when k (unseal-incoming k resp))]
-                ;; The audit line says whether prose crossed sealed, because "did
-                ;; the key work" is otherwise a question only a Recipe can answer.
-                ;; A count and never a value, and never the key.
+                ;; The audit line says whether prose crossed sealed, and whether
+                ;; anything was echoed rather than freshly sealed, because "did the
+                ;; key work" and "did the echo rule fire" are otherwise questions
+                ;; only a Recipe and a version number can answer. Counts and never
+                ;; a value, and never the key.
                 (apply log! "ALLOW" request-method uri "->" (:status resp)
-                       (concat (when-let [n (:sealed out)] [(str "sealed:" n)])
+                       (concat (when (pos? (:sealed out 0)) [(str "sealed:" (:sealed out))])
+                               (when (pos? (:echoed out 0)) [(str "echoed:" (:echoed out))])
                                (when opened ["opened"])))
                 {:status (:status resp)
                  :headers (select-keys (:headers resp) ["content-type"])

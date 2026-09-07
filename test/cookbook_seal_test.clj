@@ -8,6 +8,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.set]
             [cookbook-seal :as seal]))
 
 (def ^:private vectors-path
@@ -508,6 +509,26 @@
     (is (nil? (seal/write-target "/api/recipes/7/sealed")))
     (is (nil? (seal/write-target "/api/inbox/9/approve")))
     (is (nil? (seal/write-target "/api/machine-user/password")))))
+
+(deftest every-sealed-table-is-classified-as-written-here-or-by-the-server
+  (testing "**the one gap a new *table* left**, found in review. A new *column* is
+    safe by construction — it is read out of `sealed-columns` at call time and
+    flows through the SELECT, the UPDATE, the AAD, `prose-in`, `state-of` and
+    `seal-write` with no hand-edit anywhere. A new table was not: nothing could
+    name a path for it, `write-target` would answer `nil`, and the proxy would
+    forward its prose in the clear with no error at all.
+
+    So the inventory is partitioned, at load, in the file every Clojure client
+    requires. This asserts the partition rather than the throw, because the throw
+    cannot be reached from a suite that has already loaded the namespace."
+    (is (= (set (keys seal/sealed-columns))
+           (into seal/server-derived (keys seal/write-paths))))
+    (is (empty? (clojure.set/intersection seal/server-derived (set (keys seal/write-paths))))
+        "and nothing is both")
+    (testing "and every directly written table has a path that `write-target` finds"
+      (doseq [[table segment] seal/write-paths]
+        (is (= {:table table} (seal/write-target (str "/api/" segment))))
+        (is (= {:table table :id 7} (seal/write-target (str "/api/" segment "/7"))))))))
 
 (deftest publish-target-is-its-own-matcher
   (is (= 7 (seal/publish-target "/api/recipes/7/publish")))

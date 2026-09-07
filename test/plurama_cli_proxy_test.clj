@@ -133,6 +133,21 @@
                          :body (json/generate-string {:description "unchanged"})})
           (let [sent (json/parse-string (:body (first (writes (:seen up)))) true)]
             (is (= stored (:description sent)) "byte for byte"))))
+      (testing "the audit line says which it was, and that is L4: one count could
+        not tell a real edit from an idempotent resend, since a no-op write also
+        turns four plaintext fields into four ciphertexts on the wire"
+        (with-upstream {"/api/recipes/7/versions" {:body {:published 0
+                                                          :versions [{:version 2 :current true
+                                                                      :description stored}]}}
+                        "/api/recipes/7" {:body {:id 7 :version 2}}}
+          (fn [up]
+            (let [logged (java.io.StringWriter.)]
+              (binding [*out* logged]
+                (request up k {:method :put :uri "/cookbook/api/recipes/7"
+                               :body (json/generate-string {:description "unchanged"})}))
+              (is (str/includes? (str logged) "echoed:1"))
+              (is (not (str/includes? (str logged) "sealed:"))
+                  "nothing new was sealed, and the log no longer says it was")))))
       (testing "and a value that did change is sealed afresh"
         (with-upstream {"/api/recipes/7/versions" {:body {:published 0
                                                           :versions [{:version 2 :current true
@@ -287,6 +302,8 @@
           (let [logged (str out)]
             (is (str/includes? logged "ALLOW"))
             (is (str/includes? logged "sealed:1") "the count is the useful part")
+            (is (not (str/includes? logged "echoed:"))
+                "and this one was a real edit, not an echo")
             (is (not (str/includes? logged secret)))
             (is (not (str/includes? logged "a new sentence, also private")))
             (is (not (str/includes? logged key-b64)))

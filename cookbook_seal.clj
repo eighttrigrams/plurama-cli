@@ -708,19 +708,56 @@
 ;; So they live here, pure, beside the inventory they are made of. The transport
 ;; stays with each caller, because that is the part that genuinely differs.
 
+(def write-paths
+  "Table → the API path segment a client writes it under. Two of them, and the
+  reason this is data rather than two `cond` branches is the guard below it."
+  {:recipes "recipes"
+   :scopes  "scopes"})
+
+(def server-derived
+  "The tables in the inventory that **no client ever names in a path**, because
+  the server fills them by copying prose it cannot read: `archive!` writes the
+  outgoing row into the history on every save, `approve-proposal!` writes a
+  proposal into the row, `merge-content` fills a partial proposal from the row.
+  That copying is why one binding covers all three — see `bound-as`."
+  #{:recipe_history :recipe_proposals})
+
+(when-not (= (set (keys sealed-columns))
+             (into server-derived (keys write-paths)))
+  ;; **A fourteenth table in the inventory has to be classified here or nothing
+  ;; starts.** Found in review as the one gap a new *table* left, where a new
+  ;; column is safe by construction: columns are read out of `sealed-columns` at
+  ;; call time and flow through the SELECT, the UPDATE, the AAD, `prose-in`,
+  ;; `state-of` and `seal-write` untouched by hand, but a table nothing could name
+  ;; a path for would have had its prose forwarded **in the clear, with no error**
+  ;; — the proxy answering `nil` from `write-target` and sealing nothing.
+  ;;
+  ;; So: written directly, or written by the server. There is no third kind, and
+  ;; the refusal is at load, in the file every clj client requires.
+  (throw (ex-info (str "cookbook-seal: a sealed table is neither written directly nor "
+                       "derived by the server: "
+                       (pr-str (sort (map name (remove (into server-derived (keys write-paths))
+                                                       (keys sealed-columns)))))
+                       " — classify it in `write-paths` (and give it a path) or in "
+                       "`server-derived`")
+                  {:sealed-columns (sort (map name (keys sealed-columns)))})))
+
 (defn write-target
   "Which table a cookbook write is aimed at, and at which row — `nil` for
   everything else, which is most of the API. `/recipes/7/publish` is deliberately
   not matched: what it can carry is an *unseal*, plaintext going back over
-  ciphertext, which is the opposite of what this is for."
+  ciphertext, which is the opposite of what this is for.
+
+  Built from `write-paths` rather than spelled out, so that a table added to the
+  inventory cannot be written through here without a path having been chosen for
+  it — see the guard above."
   [path]
-  (let [p (-> path (str/split #"\?") first (str/replace #"/$" ""))
-        id #(parse-long (last (str/split % #"/")))]
-    (cond
-      (= p "/api/recipes") {:table :recipes}
-      (= p "/api/scopes")  {:table :scopes}
-      (re-matches #"/api/recipes/\d+" p) {:table :recipes :id (id p)}
-      (re-matches #"/api/scopes/\d+" p)  {:table :scopes  :id (id p)})))
+  (let [p (-> path (str/split #"\?") first (str/replace #"/$" ""))]
+    (first (for [[table segment] write-paths
+                 :let [base (str "/api/" segment)]
+                 :when (or (= p base) (re-matches (re-pattern (str base "/\\d+")) p))]
+             (cond-> {:table table}
+               (not= p base) (assoc :id (parse-long (last (str/split p #"/")))))))))
 
 (defn publish-target
   "The Recipe id a cookbook publish names, or `nil`. A separate matcher from
