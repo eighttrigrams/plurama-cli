@@ -193,6 +193,34 @@
             (is (= ["description"] (:columns (body-of resp))))
             (is (empty? (writes (:seen up))) "and nothing reached the server")))))))
 
+(deftest an-echoed-envelope-the-proxy-can-open-is-forwarded-unchanged
+  (testing "**the hole the double-seal refusal left open**, found in review and
+    reproduced live before it was fixed. `foreign-envelopes` permits the value the
+    row already holds, on the grounds that `seal`'s rule 2 makes it a no-op — and
+    that was true only while the proxy *could not* open it. When it can, `unseal`
+    answered the plaintext, the arriving ciphertext differed from it, and the
+    ciphertext was sealed: enc(enc(…)) on the shelf, `sealed:2 opened` in the
+    audit line, a version bump and a history row, and `--verify` reporting a
+    holding invariant over it.
+
+    The fix is a byte test in front of the unseal, in `cookbook-seal/seal`. This
+    is the shape asserted at the door it came in by."
+    (let [k @test-key
+          stored (seal/seal k :recipes :description "line one of new prose")]
+      (with-upstream {"/api/recipes/7/versions" {:body {:published 0
+                                                        :versions [{:version 1 :current true
+                                                                    :description stored}]}}
+                      "/api/recipes/7" {:body {:id 7}}}
+        (fn [up]
+          (let [resp (request up k {:method :put :uri "/cookbook/api/recipes/7"
+                                    :body (json/generate-string {:description stored})})]
+            (is (not= 400 (:status resp)) "an echo is not a foreign envelope")
+            (let [sent (json/parse-string (:body (first (writes (:seen up)))) true)]
+              (is (= stored (:description sent)) "byte-identical — no second envelope")
+              (is (= "line one of new prose"
+                     (seal/unseal k :recipes :description (:description sent)))
+                  "and one unseal still reaches the prose"))))))))
+
 (deftest an-envelope-that-is-the-value-already-stored-is-an-echo-and-not-a-refusal
   (testing "a client that read a value this proxy could not open, and sent it back
     unchanged, is echoing rather than sealing — `seal`'s rule 2 answers that case,

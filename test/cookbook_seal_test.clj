@@ -205,6 +205,40 @@
              (seal/unseal k :recipes :description
                           (seal/seal k :recipes :description "The text as it stands." stored)))))))
 
+(deftest an-echoed-envelope-this-key-can-open-is-a-no-op-and-not-a-second-envelope
+  (testing "**the shape the rule was wrong about**, found in review. `v` and
+    `stored` both the stored ciphertext, and this key opens it: `unseal` answers
+    the *plaintext*, `v` is the *ciphertext*, they differ — so the rule as written
+    sealed the ciphertext and stored enc(enc(…)), which opens once into an
+    envelope and reads as one, with nothing anywhere reporting an error.
+
+    It is not a shape nobody sends. The proxy sidecar permits exactly this value
+    through its double-seal refusal, on the grounds that an echo is a no-op; the
+    grounds were false. Every write of it nested one more layer."
+    (let [k (test-key)
+          stored (seal/seal k :recipes :description "The text as it stands.")]
+      (is (= stored (seal/seal k :recipes :description stored stored))
+          "byte-identical, and no second envelope")
+      (is (= "The text as it stands." (seal/unseal k :recipes :description
+                                                   (seal/seal k :recipes :description stored stored)))
+          "one unseal reaches the prose, which is what nesting would have broken")
+      (testing "and the same for every column and table the fixture names, since a
+        nested value is unreadable in whichever of them it lands"
+        (doseq [{:keys [table column sealed]} (:vectors @fixture)]
+          (is (= sealed (seal/seal (test-key) table column sealed sealed)))))))
+
+  (testing "a *different* envelope over an openable stored one is still a write:
+    the byte test must not swallow a real change"
+    (let [k (test-key)
+          stored (seal/seal k :recipes :description "the old text")
+          other (seal/seal k :recipes :description "a value from somewhere else")
+          out (seal/seal k :recipes :description other stored)]
+      (is (not= stored out))
+      (is (seal/sealed? (seal/unseal k :recipes :description out))
+          "and it nests, because that is what writing an envelope as prose means —
+           this is nit 9 and is still deliberately not guarded here; what guards it
+           is the proxy's refusal and, since this round, `--verify`"))))
+
 (deftest an-unopenable-stored-value-does-not-block-the-write
   (let [k (test-key)
         other (seal/key-from-base64 (:other-key-base64 @fixture))
