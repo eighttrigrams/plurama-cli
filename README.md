@@ -347,8 +347,16 @@ whole of how to not make it.
 A second run changes nothing and says so. One row is one statement is one
 transaction, so a pass killed halfway leaves a legal half-sealed database — mixed
 state is legal permanently, everywhere — and the next run picks up where it
-stopped. Each write carries the values it read in its `WHERE`, so a row that
-moved underneath the pass is reported rather than written over.
+stopped. Each write carries the values it read in its `WHERE`, **and that the
+Recipe is still unpublished**, so neither a value that moved underneath the pass
+nor a Recipe published underneath it is written over.
+
+**It exits non-zero for anything it cannot call finished** — not only for a
+`--verify` violation. A value it could not open, a nested envelope, a prose
+column holding a BLOB, an envelope inside a published Recipe's trail, a row that
+moved, or a journal beside the database: each prints a paragraph saying what it
+is and what to do, and none of them lets the summary line claim the database is
+where it should be.
 
 ### Running it against production
 
@@ -356,11 +364,26 @@ The key is never on fly, so the pass cannot run there. It runs on the owner's
 laptop against a pulled copy, and the sealed file goes back up — a downtime
 cutover, once:
 
-1. **Back the database up, and open the backup.** This is the irreversible step.
+1. **Back the database up — with any `-journal` or `-wal` beside it — and open
+   the backup.** This is the irreversible step.
 2. Stop writes; pull `/app/data/cookbook.db`.
-3. `--dry-run`, and read the counts.
-4. Seal. Then `--verify`, which must exit 0.
+3. `--dry-run`, and read the counts. **Check the fingerprint in the header against
+   the ⚙ panel**; and if `PUBLISHED-SEALED` is anything but 0, stop.
+4. Seal. Then `--verify`, **which must exit 0**. This is not advisory: the pass
+   and the verify catch different things, and the verify is what catches a Recipe
+   published while the pass ran.
 5. Push it back; start.
+
+**If the pass was interrupted — a closed terminal, a sleeping laptop, an
+impatient `Ctrl-C` — do not copy the file. Run the pass again first.** In
+`journal_mode=delete`, which is what cookbook uses, an interrupted write leaves a
+`-journal` holding the pre-images while the database file is already modified, so
+the `.db` on its own is either torn or silently different from what was
+committed. Opening the database is the repair — SQLite rolls the journal back —
+which is why re-running fixes it, and why the walker names any journal it finds
+and then exits non-zero even though it has just repaired it: the run that did the
+repairing is not the run whose exit code you should push on. Never copy a `.db`
+while a `-journal` or `-wal` sits beside it.
 
 Deploy the unseal-capable clients **first** and confirm them live: prefix-driven
 unseal makes the mixed window legal, and the failure mode is a cached old browser
@@ -414,8 +437,12 @@ eight characters the web UI's ⚙ panel shows, so that *the proxy holds the key 
 browser holds* is a comparison anyone can make in five seconds:
 
 ```
- cookbook prose: sealed here, key /cookbook-seal.key fingerprint 747d8453
+ cookbook prose: sealed here, key /cookbook-seal.key fingerprint d53515b0
 ```
+
+(`d53515b0` is the test key in `seal-vectors.edn`, so that the one example line
+in this file names a key that is in the repo on purpose rather than one somebody
+is actually using.)
 
 ### The key belongs on one side of this hop, never both
 
@@ -454,8 +481,14 @@ comparing against what is stored is what tells the two apart.
   goes over the wire byte-identical.
 - **The audit line carries a count and never a value**, and never the key:
 
-      ALLOW :put /cookbook/api/recipes/7 -> 200 sealed:2 opened
+      ALLOW :put /cookbook/api/recipes/7 -> 200 sealed:2 opened   a real edit
+      ALLOW :put /cookbook/api/recipes/7 -> 200 echoed:2 opened   the same body again
       DENY :put /cookbook/api/recipes/7 - prose already sealed: description
+
+  `sealed:n` is columns newly sealed and `echoed:n` is columns handed back as the
+  ciphertext the row already held, counted apart so that *the echo rule fired* is
+  something the log can be read for — one number could not tell a real edit from
+  an idempotent resend.
 
 The in-box client needs no change for any of this. It holds no key, so its own
 sealing is off by its own first rule — the build mounted in the boxes today

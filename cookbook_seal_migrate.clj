@@ -527,11 +527,17 @@
     (println (apply str (format "  %-18s" "total")
                     (map (fn [[b :as c]] (format (str "%" (w c) "s  ") (str (get total b 0)))) used)))))
 
+(defn- plural
+  "`1 violation`, `2 violations`. Trivial, and it exists because the two places
+  that count violations disagreed about it — the list said *1 violation:* and the
+  summary line beneath it said *1 violations*."
+  [n word]
+  (str n " " word (when (not= 1 n) "s")))
+
 (defn- print-violations [violations]
   (when (seq violations)
     (println)
-    (println (str "  " (count violations) " violation"
-                  (when (not= 1 (count violations)) "s") ":"))
+    (println (str "  " (plural (count violations) "violation") ":"))
     (doseq [{:keys [table row column why]} (take 40 violations)]
       (println (format "    %-16s %-24s %-12s %s" (name table) row (name column)
                        (case why
@@ -718,7 +724,8 @@
           (println)
           (case mode
             :verify (println (str "  " (if (seq violations)
-                                         (str (count violations) " violations — the invariant does not hold.")
+                                         (str (plural (count violations) "violation")
+                                              " — the invariant does not hold.")
                                          "The invariant holds.")))
             :dry-run (println (str "  Dry run: " (get total :changed 0) " values in "
                                    (get total :rows 0) " rows would be "

@@ -1,3 +1,14 @@
 .cpcache/
 .clj-kondo/.cache/
 .claude/
+
+# The walker runs from a checkout, against a database and with a key, so this is
+# the repo that invites a stray cookbook-seal.key at its root. A leaked password
+# can be rotated; a leaked key cannot, and there is no reset — see README, "Where
+# the key comes from". Named here so that `git add -A` cannot pick one up.
+*.key
+
+# And, for the same reason, a copy of a database pulled down to be migrated.
+*.db
+*.db-journal
+*.db-wal
