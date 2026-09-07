@@ -32,6 +32,7 @@
 (def ^:private update-sql @#'walk/update-sql)
 (def ^:private read-table @#'walk/read-table)
 (def ^:private tables @#'walk/tables)
+(def ^:private sidecars @#'walk/sidecars)
 
 (def ^:private repo-root
   "The suite runs from the repo root — `bb test` says so — and the one test that
@@ -50,11 +51,20 @@
 
 ;; ---------------------------------------------------------------------------
 
-(def ^:private test-key
+(def ^:private test-key-base64
   ;; Generated, not the fixture's: nothing here pins a ciphertext — that is the
   ;; envelope suite's job next door — and what these need of a key is that there
   ;; is one, and that a second one is different.
-  (delay (seal/key-from-base64 (seal/generate-key-base64))))
+  ;;
+  ;; **Kept as the base64 rather than only as the key**, so that the tests which
+  ;; drive the script as a *program* can hand it the same key through
+  ;; `COOKBOOK_SEAL_KEY`. A subprocess holding a different key sees every sealed
+  ;; value as unopenable, which makes every exit code 1 for the wrong reason —
+  ;; and an exit-code test that cannot distinguish its reasons is not one.
+  (delay (seal/generate-key-base64)))
+
+(def ^:private test-key
+  (delay (seal/key-from-base64 @test-key-base64)))
 
 (def ^:private other-key
   (delay (seal/key-from-base64 (seal/generate-key-base64))))
@@ -149,6 +159,24 @@
     ;; of a publish and are walked whatever their Recipes are.
     (insert! db :scopes {:id 2 :title "Public Recipe's Scope" :description "still the owner's"})
     (insert! db :scopes {:id 3 :title "No prose" :description ""})
+    db))
+
+(defn- clean-db
+  "A database with nothing wrong in it: two unpublished Recipes in the clear, one
+  history row, one Scope. What a pass over it does is seal everything and exit 0,
+  which is the control every exit-code assertion below is measured against."
+  []
+  (let [dir (java.nio.file.Files/createTempDirectory
+             "seal-walk-clean" (into-array java.nio.file.attribute.FileAttribute []))
+        db (str (.resolve dir "cookbook.db"))]
+    (sqlite! db schema)
+    (insert! db :recipes {:id 1 :title "one" :description "a body" :useful_when "when"
+                          :reason nil :context nil})
+    (insert! db :recipes {:id 2 :title "two" :description "another body" :useful_when ""
+                          :reason nil :context nil})
+    (insert! db :recipe_history {:recipe_id 1 :version 1 :description "v1" :useful_when nil
+                                 :reason nil :context nil})
+    (insert! db :scopes {:id 1 :title "a Scope" :description "Scope prose"})
     db))
 
 (defn- pass
@@ -298,6 +326,48 @@
         (is (= "0" out) "changes() — the row was not written"))
       (is (= ["moved"] (rows db "SELECT description FROM recipes WHERE id=1;"))))))
 
+(deftest a-publish-racing-the-pass-does-not-get-its-prose-sealed
+  (testing "**M1.** `published` decides whether a row is walked at all and is read
+    once, for a whole table, before any row is written. Publishing a Recipe whose
+    prose is still plaintext — every Recipe, pre-migration — changes no prose
+    value, so the compare-and-set on the values matched and the pass sealed a
+    Recipe that had gone public underneath it. The pass then exited 0, having
+    counted `:changed`, and a published page served base64.
+
+    Staged the way the reviewer staged it: read the row, publish it, then run the
+    write the pass would have run. All three tables that hang off a Recipe, since
+    the trail is what publishing makes public."
+    (let [db (fresh-db)
+          row-of (fn [table pred] (first (filter pred (read-table db table))))]
+      (testing "the Recipe's own row"
+        (let [row (row-of :recipes #(= 1 (:id (:key %))))
+              before (raw db :recipes :description "id=1")]
+          (sqlite! db "UPDATE recipes SET published = 1 WHERE id = 1;")
+          (is (= "0" (str/trim (first (rows db (update-sql :recipes row {:description "sealed"})))))
+              "changes() — the write did not land")
+          (is (= before (raw db :recipes :description "id=1"))
+              "and the prose is byte for byte the plaintext it was, not an envelope")))
+      (testing "a history row of a Recipe published in between"
+        (let [row (row-of :recipe_history #(= 4 (:recipe_id (:key %))))]
+          ;; Recipe 4 is published in the fixture; unpublish it, read, re-publish.
+          (sqlite! db "UPDATE recipes SET published = 0 WHERE id = 4;")
+          (let [row (row-of :recipe_history #(= 4 (:recipe_id (:key %))))]
+            (sqlite! db "UPDATE recipes SET published = 1 WHERE id = 4;")
+            (is (= "0" (str/trim (first (rows db (update-sql :recipe_history row
+                                                            {:description "sealed"})))))))
+          (is (some? row))))
+      (testing "and a proposal against one"
+        (sqlite! db "UPDATE recipes SET published = 0 WHERE id = 4;")
+        (let [row (row-of :recipe_proposals #(= 2 (:id (:key %))))]
+          (sqlite! db "UPDATE recipes SET published = 1 WHERE id = 4;")
+          (is (= "0" (str/trim (first (rows db (update-sql :recipe_proposals row
+                                                          {:description "sealed"}))))))))
+      (testing "an orphan has no Recipe to be published, and is still written"
+        (let [row (row-of :recipe_proposals #(= 3 (:id (:key %))))]
+          (is (= "1" (str/trim (first (rows db (update-sql :recipe_proposals row
+                                                          {:description "sealed"})))))
+              "`IS NOT 1` and not `= 0`, so a NULL still passes"))))))
+
 (deftest the-walk-and-the-inventory-name-the-same-tables
   (testing "the guard that runs at load: a table added to `sealed-columns` and
     forgotten in the walk would be walked by nobody and reported by nothing"
@@ -316,17 +386,93 @@
     (testing "and the same value handed in as `stored` is what would have gone wrong"
       (is (= "a body" (seal/seal @test-key :recipes :description "a body" "a body"))))))
 
+(defn- run-script
+  "The walker as a program, with the suite's own key, from the repo root."
+  [& args]
+  (let [{:keys [exit out]} (apply p/shell {:out :string :err :string :continue true
+                                           :dir repo-root
+                                           :extra-env {"COOKBOOK_SEAL_KEY" @test-key-base64}}
+                                  "bb" "cookbook_seal_migrate.clj" args)]
+    {:exit exit :out out}))
+
 (deftest the-exit-code-is-the-contract
   (testing "a migration script is run by a person watching a shell, and by
-    whatever they wrap it in. `--verify` answering 1 is the whole of how a pass is
-    known to have finished."
-    (let [db (fresh-db)
-          run (fn [& args]
-                (:exit (apply p/shell {:out :string :err :string :continue true
-                                       :dir repo-root
-                                       :extra-env {"COOKBOOK_SEAL_KEY" (seal/generate-key-base64)}}
-                              "bb" "cookbook_seal_migrate.clj" (concat args [db]))))]
-      ;; A key that opens nothing at all: every sealed value is unopenable, which
-      ;; is itself a refusal to report success.
-      (is (= 1 (run "--verify")) "an unsealed database does not satisfy the seal invariant")
-      (is (= 2 (run "--verify" "/tmp/there-is-no-database-here.db")) "and a missing file is a local error"))))
+    whatever they wrap it in. The exit code is the whole of how a pass is known to
+    have finished, and §7 of the review makes the seal→verify ladder mandatory on
+    the strength of it."
+    (let [db (fresh-db)]
+      (is (= 1 (:exit (run-script "--verify" db)))
+          "an unmigrated database does not satisfy the seal invariant")
+      (is (= 2 (:exit (run-script "--verify" "/tmp/there-is-no-database-here.db")))
+          "and a missing file is a local error")))
+
+  (testing "**a clean pass exits 0** — the negative control, without which none of
+    the numbers below mean anything"
+    (let [db (clean-db)]
+      (is (= 0 (:exit (run-script db))))
+      (is (= 0 (:exit (run-script "--verify" db))))
+      (is (= 0 (:exit (run-script db))) "and again, idempotently")
+      (is (= 0 (:exit (run-script "--unseal" db))))
+      (is (= 0 (:exit (run-script "--verify" "--unseal" db))))))
+
+  (testing "**M2: a pass that finds an envelope inside a published Recipe's trail
+    must not exit 0.** It printed `PUBLISHED-SEALED 1` in its own table and then
+    said the database was where it should be — against this file's own decision
+    that a pass leaving a value in a state it cannot call finished should not
+    answer 0. It is also the state a publish racing the pass produces (M1)."
+    (let [db (clean-db)]
+      (insert! db :recipes {:id 90 :title "published, sealed" :published 1
+                            :description (sealed @test-key :recipes :description "should not be here")
+                            :useful_when "plain" :reason nil :context nil})
+      (let [{:keys [exit out]} (run-script db)]
+        (is (= 1 exit))
+        (is (str/includes? out "PUBLISHED-SEALED"))
+        (is (not (str/includes? out "already where it should be"))
+            "and the summary line no longer claims otherwise"))
+      (is (= 1 (:exit (run-script "--verify" db))))))
+
+  (testing "**M4: a nested envelope is a violation, in a pass and in a verify.**
+    Before this round `--verify` opened it once, found an envelope, called it
+    sealed and printed *The invariant holds.* — over prose a reader meets as
+    `enc:v1:…`."
+    (let [db (clean-db)
+          once (sealed @test-key :recipes :description "the prose under two layers")]
+      (insert! db :recipes {:id 91 :title "nested"
+                            :description (sealed @test-key :recipes :description once)
+                            :useful_when "plain" :reason nil :context nil})
+      (let [{:keys [exit out]} (run-script "--verify" db)]
+        (is (= 1 exit))
+        (is (str/includes? out "NESTED"))
+        (is (str/includes? out "an envelope inside an envelope")))
+      (let [{:keys [exit out]} (run-script db)]
+        (is (= 1 exit) "and a pass over it does not report success either")
+        (is (str/includes? out "envelope inside an envelope")))
+      (testing "`--unseal` opens one layer per run, and says the second is needed"
+        (is (= 1 (:exit (run-script "--unseal" db))) "an envelope still remains")
+        (is (= 1 (:exit (run-script "--verify" "--unseal" db))))
+        (is (= 0 (:exit (run-script "--unseal" db))) "the second run finishes it")
+        (is (= 0 (:exit (run-script "--verify" "--unseal" db)))))))
+
+  (testing "**M3: a journal beside the database is named on the way in and
+    refused on the way out.** It is the one way an interrupted pass becomes a
+    damaged production file, and it turns on what the operator does next — the
+    procedure's next step being to copy the file somewhere."
+    (let [db (clean-db)]
+      (spit (str db "-journal") "not a real journal, but a file by that name")
+      (let [{:keys [exit out]} (run-script "--unseal" db)]
+        (is (= 1 exit) "a run over a database with an unfinished write is not a clean answer")
+        (is (str/includes? out "sat beside this database")
+            "named — and it has to be *taken* before the first sqlite3 call, since
+             opening the file is what rolls the journal back and deletes it")
+        (is (str/includes? out "never copy the .db anywhere while one is there")))
+      (is (empty? (sidecars db)) "opening the database was the repair")
+      (is (= 0 (:exit (run-script "--unseal" db)))
+          "and the next run, over the repaired file, is the one to trust")
+      ;; There is deliberately no case here for a journal *still* there at the
+      ;; end. Every mode opens the database — even `--dry-run`, to read the
+      ;; pragmas — so by then it has been rolled back and deleted, which is why the
+      ;; note is worded as *sat* and why the exit code turns on the answer taken
+      ;; before the first open. The end-of-run check stays as the cheap answer to
+      ;; the only case that could still produce one: something else writing while
+      ;; this ran, and dying.
+      )))
