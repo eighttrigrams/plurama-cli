@@ -12,3 +12,8 @@
 *.db
 *.db-journal
 *.db-wal
+
+# `make dist` — the flattened, self-contained scripts. Built artifacts, and the
+# two that carry credentials are baked from them by the private deploy script,
+# so a staged one is a step away from holding passwords.
+target/

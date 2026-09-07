@@ -2,10 +2,12 @@
 ;;
 ;; `:paths` is what makes `cookbook_seal.clj` requirable from a checkout, so that
 ;; the envelope is one file rather than one copy inside `plurama_cli.clj` and a
-;; second inside `cookbook_tui.clj`. The installed binaries are baked by the
-;; private deploy script, which already concatenates namespaces into one file for
-;; `us-vs-them`; it has to do the same here, and babashka says so loudly rather
-;; than quietly if it does not.
+;; second inside `cookbook_tui.clj`. Outside a checkout there is no classpath to
+;; put it on, and babashka says so loudly rather than quietly: an installed lone
+;; file refuses to start. That is what the `Makefile` beside this is for —
+;; `make dist` collects the namespaces into one self-contained script, the same
+;; target `us-vs-them` has, and the private deploy script bakes credentials into
+;; what it produces rather than into a source file.
 ;;
 ;; `test` is the drift control. It reads the shared vector file out of the
 ;; cookbook checkout beside this one — the same sibling-checkout idiom cookbook's

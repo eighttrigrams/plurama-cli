@@ -135,13 +135,35 @@ bbin install https://raw.githubusercontent.com/eighttrigrams/plurama-cli/main/pl
 
 Or run it straight from a checkout: `bb plurama_cli.clj treina /describe`.
 
-**Since the cookbook seal landed, that one-file install is no longer enough.**
-`plurama_cli.clj` and `cookbook_tui.clj` both `require` `cookbook_seal.clj`, so
-whatever installs them has to carry that file too — the private deploy script
-concatenates namespaces into one baked file already, which is exactly how
-`us-vs-them` ships. From a checkout `bb.edn` puts it on the classpath and nothing
-has to be done. If it is missing, babashka refuses to start; nothing about this
-fails quietly.
+**Since the cookbook seal landed, that one-file install is no longer enough** —
+and `make dist` is the answer to it. `plurama_cli.clj` and `cookbook_tui.clj`
+both `require` `cookbook_seal.clj`, so whatever installs them has to carry that
+file too, and a URL is one file. From a checkout `bb.edn` puts the seal on the
+classpath and nothing has to be done; installed as a lone file, babashka refuses
+to start. Nothing about this fails quietly:
+
+```
+Could not locate cookbook_seal.bb, cookbook_seal.clj or cookbook_seal.cljc on classpath.
+```
+
+So there is a `Makefile` now, the same one `us-vs-them` has and for the same
+reason. `bb uberscript` collects the required namespaces into one self-contained
+script — the concatenation the seal's own docstring asks for — and
+
+```bash
+make dist                    # target/plurama-cli, target/cookbook-tui, target/cookbook-seal-migrate
+make install                 # the two commands, flattened, on your PATH
+make dist DIST=/tmp/stage    # build somewhere else; what a deploy does
+```
+
+`make install` installs them **unbaked**: they carry the credential marker
+rather than credentials, so they read `~/.config/plurama-cli/credentials.edn`
+as above. The owner's install is the private
+`deploy-plurama-cli-cookbook-tui-and-us-vs-them-cli.sh`, which builds these same
+artifacts with `make dist` and then substitutes the credential blob into them.
+
+`make dist` also builds `cookbook-seal-migrate`, which is not installed — see
+its section below. The `Makefile` says why it is built anyway.
 
 ## `cookbook-tui` — a second binary in this repo
 
@@ -319,7 +341,13 @@ bb cookbook_seal_migrate.clj --unseal data/cookbook.db    # the escape hatch
 ```
 
 It runs from a checkout — it is not one of the installed binaries, because it is
-not a thing anybody runs twice. It needs `sqlite3` on `PATH` and a key, and
+not a thing anybody runs twice. `make dist` builds it anyway, next to the two
+that are: it requires the seal like they do, so it has the same lone-file
+problem, and it runs wherever the *database file* is. Needing a checkout at that
+moment buys nothing, and one script you can copy next to the backup you are
+about to seal is the better shape. Its `--help` still names the checkout
+invocation above, which is the one the deploy script and this README document.
+It needs `sqlite3` on `PATH` and a key, and
 **unlike every other client here it refuses to run without one**: no key means
 sealing off everywhere else, and here that would be a pass that walks the whole
 shelf, writes nothing and reports success.
