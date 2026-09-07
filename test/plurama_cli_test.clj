@@ -16,6 +16,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [cheshire.core :as json]
             [cookbook-seal :as seal]
+            [cookbook-tui]
             [plurama-cli]))
 
 (def ^:private seal-request-body @#'plurama-cli/seal-request-body)
@@ -71,6 +72,23 @@
       (is (= "{\"description\":\"x\"}"
              (seal-request-body nil nil :put "/recipes/7" "{\"description\":\"x\"}"))
           "including one that carries prose, which is what 'sealing off' means"))))
+
+(deftest cookbook-tui-is-loaded-by-a-suite-at-all
+  (testing "**it was not, and that was the gap.** `bb test` required four
+    namespaces and none of them was the TUI, so its copy of the prose columns —
+    written out by hand, the fifth statement of them in this system and the only
+    unpinned one — could have gone stale with every suite green. A fifth column
+    would then have been missing from the `stored` map it builds, the echo rule
+    would never have fired for that column, and every save from the TUI would have
+    looked like a change to the server: the ladder corruption the echo rule exists
+    to prevent.
+
+    The copy is gone — it reads `seal/sealed-columns` now — and the file is loaded
+    here so that it cannot stop compiling unnoticed either. What the TUI *does*
+    with what it reads is still checked by hand: it is a terminal program, and
+    most of it is only true against a running cookbook."
+    (is (some? (resolve 'cookbook-tui/-main))
+        "the namespace loads, which is the whole of what a suite can say about it")))
 
 (deftest the-publish-interlock-asks-the-shared-question
   (testing "not a pair spelled out inline. `refuse-sealed-publish!` and

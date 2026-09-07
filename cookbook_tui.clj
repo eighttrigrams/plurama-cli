@@ -301,7 +301,14 @@
   (let [{:keys [status body sealed]} (api :get (str "/api/recipes/" id "?detail=full"))]
     (if (= 200 status)
       (assoc body :cookbook-seal/stored
-             (select-keys sealed [:description :useful_when :reason :context]))
+             ;; **Out of the inventory, not spelled out here.** It was the fifth
+             ;; statement of the prose columns in this system and the only one no
+             ;; suite loaded: a fifth column could have been added, every suite
+             ;; stayed green, and this map omitted it — so the echo rule would
+             ;; never have fired for that column and every save from here would
+             ;; have looked like a change to the server, which is the ladder
+             ;; corruption the echo rule exists to prevent. Found in review.
+             (select-keys sealed (get seal/sealed-columns :recipes)))
       (do (println (refusal status body :read)) nil))))
 
 (defn- create! []
