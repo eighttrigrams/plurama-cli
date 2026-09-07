@@ -101,6 +101,34 @@
   deserves a local limit, where a short, stable rule beats mirroring a whole API."
   :all)
 
+(def ^:private denylist
+  "Endpoints refused here **whatever the app would otherwise allow** — the deny is
+  checked before the allowlist, so it overrides `:all`. Same shape as `allowlist`:
+  app → `[method upstream-path-pattern]`, matched in full.
+
+  Where `allowlist` narrows a target to a few permitted routes — and pays for it
+  by having to keep a copy of that route list in step with the app — a denylist
+  names the one or two actions too costly to leave to the app's own gate and
+  leaves everything else `:all`. It does not go stale the way an allowlist does:
+  a new cookbook endpoint stays reachable, which is right, and only the named
+  action stays blocked.
+
+  **cookbook publish is that action, and today it is the only one.** Publishing a
+  Recipe is irreversible — there is no unpublish — and after sealing it decrypts
+  the Recipe's whole trail permanently and hands it to the public. cookbook's
+  server already refuses a machine token the publish latch, so this is defence in
+  depth: a second, independent gate that does not depend on that server check
+  staying correct, sitting in a file no in-box agent can edit and no sandbox can
+  reach around. The path is the upstream one `split-target` yields — `/cookbook`
+  stripped — so `POST /api/recipes/<id>/publish` and nothing else."
+  {:cookbook [[:post #"/api/recipes/[^/]+/publish"]]})
+
+(defn- denied? [app method path]
+  (boolean
+   (some (fn [[m pattern]]
+           (and (= m method) (re-matches pattern path)))
+         (get denylist app))))
+
 (defn- allowed? [app method path]
   (let [rules (get allowlist app default-policy)]
     (if (= :all rules)
@@ -370,6 +398,13 @@
       (do (log! "DENY" request-method uri "- unknown app")
           (json-response 404 {:error (str "unknown app: " (name app))
                               :configured (sort (map name (keys @credentials)))}))
+
+      (denied? app request-method path)
+      (do (log! "DENY" request-method uri "- blocked by proxy denylist")
+          (json-response 403 {:error "refused by proxy denylist"
+                              :app (name app)
+                              :method (name request-method)
+                              :path path}))
 
       (not (allowed? app request-method path))
       (do (log! "DENY" request-method uri "- not in allowlist")
