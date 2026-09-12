@@ -94,82 +94,41 @@
   requires it — which is exactly what it already does for `us-vs-them`, whose
   installed single file is `core.clj`, `caution.clj` and `cli.clj` one after the
   other. Nothing fails silently if that is forgotten: babashka refuses to start."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [seal-envelope :as env]))
 
 ;; ---------------------------------------------------------------------------
-;; The envelope.
+;; The envelope, which is not cookbook's any more.
+;;
+;; It moved to `seal_envelope.clj` when tracker became the second app to seal
+;; prose. What is generic — the `enc:v1:` shape, AES-256-GCM, the three rules,
+;; how a key is found — is one file now, because two spellings of one
+;; cryptographic control is how they drift, and a fixture cannot police a copy.
+;;
+;; What stayed is everything below that is *about cookbook*: what a value is
+;; bound to, which thirteen columns are sealed, what a visitor may see, which
+;; HTTP paths carry prose, and the shapes its responses come back in.
+;;
+;; These names are re-exported rather than left to callers to reach through, so
+;; that every existing call site — `plurama_cli.clj`, `cookbook_tui.clj`, the
+;; proxy, the walker, the suite — keeps reading exactly as it did.
 
-(def envelope-prefix
-  "Self-describing and versioned. A reader — a person looking at the database, a
-  half-migrated row, another implementation — can tell a sealed value from a
-  plain one without being told which columns are sealed."
-  "enc:v1:")
-
-(def ^:private nonce-length 12)   ; 96 bits, the GCM standard
-(def ^:private tag-bits 128)
-(def ^:private key-length 32)     ; AES-256
-
-(defn- b64-encode ^String [^bytes bs]
-  (.encodeToString (java.util.Base64/getEncoder) bs))
-
-(defn- b64-decode ^bytes [^String s]
-  (.decode (java.util.Base64/getDecoder) s))
-
-(defn- utf8 ^bytes [^String s] (.getBytes s "UTF-8"))
-
-(def ^:private secure-random (delay (java.security.SecureRandom.)))
-
-(defn random-bytes ^bytes [n]
-  (let [bs (byte-array n)]
-    (.nextBytes ^java.security.SecureRandom @secure-random bs)
-    bs))
+(def envelope-prefix env/envelope-prefix)
+(def random-bytes env/random-bytes)
+(def generate-key-base64 env/generate-key-base64)
+(def fingerprint env/fingerprint)
+(def sealed? env/sealed?)
+(def blank-value? env/blank-value?)
+(def seal-text-with-nonce env/seal-text-with-nonce)
+(def seal-text env/seal-text)
+(def unseal-text env/unseal-text)
 
 (defn key-from-base64
-  "A 32-byte key, given as base64. Throws on anything else rather than padding or
-  truncating: a key of the wrong length is a configuration mistake, and the only
-  useful moment to hear about it is the first one."
+  "A 32-byte key, given as base64. `seal-envelope/key-from-base64` with
+  cookbook's name in the message, because a laptop holds more than one key and
+  which one is malformed is the whole of what the reader needs."
   [s]
-  (when-not (string? s)
-    (throw (ex-info "cookbook seal key must be base64 text" {})))
-  (let [bs (try (b64-decode (str/trim s))
-                (catch Exception _
-                  (throw (ex-info "cookbook seal key is not valid base64" {}))))]
-    (when-not (= key-length (count bs))
-      (throw (ex-info (str "cookbook seal key must be " key-length " bytes, got "
-                           (count bs))
-                      {:length (count bs)})))
-    (javax.crypto.spec.SecretKeySpec. bs "AES")))
-
-(defn generate-key-base64
-  "A fresh key, base64, for tests and for the one time a real one is minted. This
-  program never writes it anywhere — where a key is kept is `secrets.yaml` and a
-  sheet of paper, and neither is a thing a CLI should be doing on its own."
-  []
-  (b64-encode (random-bytes key-length)))
-
-(defn fingerprint
-  "Eight hex characters of SHA-256 over the raw key, the same eight the browser's
-  ⚙ panel shows.
-
-  **Not part of the envelope**: nothing is bound to it and no ciphertext carries
-  it. What it is for is telling two things that hold a key that they hold the
-  *same* key, without either of them being able to say what it is — the job an ssh
-  key fingerprint does. Half a truncated hash of 256 bits of entropy identifies a
-  key and helps nobody find one, so it is safe on a settings panel, in a proxy's
-  startup line, and in the header of a migration pass.
-
-  That last one is why it exists at all. Sealing a database with a key the owner's
-  browser cannot open is the one mistake in this whole design with no recovery,
-  and comparing eight characters against the ⚙ panel is the only cheap check that
-  it is not about to happen. A check like that is worthless if the two sides
-  compute it differently, so the answer for the fixture key is in
-  `seal-vectors.edn` under `:key-fingerprint` and both suites assert it — the same
-  treatment `bound-as` and `published-surface` get, and for the same reason."
-  [^javax.crypto.spec.SecretKeySpec k]
-  (->> (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getEncoded k))
-       (take 4)
-       (map #(format "%02x" (bit-and % 0xff)))
-       (str/join)))
+  (env/key-from-base64 "cookbook" s))
 
 (def bound-as
   "Which name a table's values are bound under — the AAD's first half.
@@ -220,221 +179,67 @@
                  (throw (ex-info (str "no seal binding for table " table) {:table table}))))
        "/" (name column)))
 
-(defn sealed?
-  "Whether a value read out of a sealed column is actually sealed. Only ever a
-  question about the prefix — see rule 3."
-  [v]
-  (boolean (and (string? v) (str/starts-with? v envelope-prefix))))
-
-(defn blank-value?
-  "The values rule 1 refuses to seal. `nil`, `\"\"`, and whitespace-only — the last
-  of those because cookbook's server refuses a blank `reason` with `str/blank?`,
-  and a client that sealed `\" \"` would be defeating that check on the server's
-  behalf. Non-strings are left alone too; a number in a prose column is not this
-  function's problem to solve.
-
-  Public because the migration walker counts by it. It reports how many values it
-  left alone for being blank, and a walker with its own idea of blank would file a
-  value under *sealed* that `seal` had handed straight back — an audit line
-  disagreeing with what is in the database."
-  [v]
-  (or (nil? v) (not (string? v)) (str/blank? v)))
-
-(defn- cipher ^javax.crypto.Cipher [mode ^javax.crypto.spec.SecretKeySpec k ^bytes nonce ^String aad-str]
-  (doto (javax.crypto.Cipher/getInstance "AES/GCM/NoPadding")
-    (.init (int mode) k (javax.crypto.spec.GCMParameterSpec. tag-bits nonce))
-    (.updateAAD (utf8 aad-str))))
-
-(defn seal-text-with-nonce
-  "**The fixture's arity, and nothing else's** — which is why it has a name you
-  have to type rather than an overload you can fall into.
-
-  A nonce supplied by a caller is a nonce that can be supplied twice, and in GCM
-  two values sealed under one key and one nonce is not a weakening, it is a total
-  break: the keystream cancels between them and the authentication key itself
-  falls out. Nothing in this application has any reason to choose one. The test
-  vectors do, because pinning an exact ciphertext is the whole point of them.
-
-  Every other caller wants `seal-text`, which takes one from the CSPRNG."
-  [k aad-str ^String plaintext ^bytes nonce]
-  (let [c (cipher javax.crypto.Cipher/ENCRYPT_MODE k nonce aad-str)
-        body (.doFinal c (utf8 plaintext))
-        out (byte-array (+ (alength nonce) (alength ^bytes body)))]
-    (System/arraycopy nonce 0 out 0 (alength nonce))
-    (System/arraycopy body 0 out (alength nonce) (alength ^bytes body))
-    (str envelope-prefix (b64-encode out))))
-
-(defn seal-text
-  "The envelope itself: plaintext in, `enc:v1:…` out. No rules, no inventory, no
-  opinion about blanks — `seal` below is what call sites use.
-
-  A fresh 96-bit nonce per value, from the CSPRNG, every time."
-  [k aad-str plaintext]
-  (seal-text-with-nonce k aad-str plaintext (random-bytes nonce-length)))
-
-(defn unseal-text
-  "The inverse, for a value known to carry the prefix. Throws when the tag does
-  not check out — a tampered ciphertext, a ciphertext moved to another column, or
-  the wrong key. `unseal` below is what call sites use."
-  [k aad-str ^String value]
-  (let [raw (b64-decode (subs value (count envelope-prefix)))
-        nonce (java.util.Arrays/copyOfRange raw 0 nonce-length)
-        body (java.util.Arrays/copyOfRange raw (int nonce-length) (alength raw))
-        c (cipher javax.crypto.Cipher/DECRYPT_MODE k nonce aad-str)]
-    (String. (.doFinal c body) "UTF-8")))
-
 ;; ---------------------------------------------------------------------------
-;; The three rules.
+;; The three rules, bound to cookbook's columns.
+;;
+;; The rules themselves are `seal-envelope/unseal-at` and `seal-envelope/seal-at`,
+;; and their docstrings are where they are argued. These two are the arity every
+;; cookbook call site wants — a table and a column rather than a resolved AAD —
+;; so that no caller is ever in a position to spell a binding itself.
 
 (defn unseal
-  "Read one value out of one column. Prefix-driven: anything without `enc:v1:`
-  comes back exactly as it went in, and so does everything when there is no key.
-
-  **A value that will not open comes back as it is**, ciphertext and all, rather
-  than throwing. That is the honest answer — this client cannot read this, and
-  inventing text or a blank would be worse — and it is the diagnosable one: one
-  unreadable value shows as `enc:v1:…` beside everything that reads, instead of a
-  single failure somewhere in a listing taking the whole response down with it.
-  The first end-to-end run of this code lost a whole version ladder that way and
-  said nothing about why.
-
-  The browser half does the same, deliberately, for the same reason."
+  "Read one value out of one column. Prefix-driven, never throws, and a no-op
+  when there is no key — see `seal-envelope/unseal-at`."
   [k table column v]
-  (if (and k (sealed? v))
-    (try (unseal-text k (aad table column) v)
-         (catch Exception _ v))
-    v))
+  (env/unseal-at k (aad table column) v))
 
 (defn seal
-  "Write one value into one column, under all three rules.
+  "Write one value into one column, under all three rules — see
+  `seal-envelope/seal-at`, where they are argued at length.
 
-  `stored` is what that column holds right now — the ciphertext this client read
-  a moment ago, a plaintext on a row not yet migrated, or `nil` for a row that
-  does not exist yet.
-
-  **When the value has not changed, `stored` comes back byte for byte, whichever
-  of those it is.** That is the whole echo rule: *does this column already say
-  what I am about to write?* It is asked twice, and both halves are load-bearing.
-
-  **First, of the bytes.** If `v` is already exactly what is stored, nothing has
-  changed and nothing is written, whatever `v` happens to be. That covers the
-  case the second half gets wrong: an **envelope handed back unchanged by a client
-  that could open it**. `unseal` of that `stored` answers the *plaintext*, `v` is
-  the *ciphertext*, they differ — and sealing would then write `enc(enc(…))`,
-  which opens once into an envelope and reads as an envelope, with nothing
-  anywhere reporting an error. That is not hypothetical: the proxy sidecar
-  deliberately lets an echoed envelope through on the strength of this rule, and
-  until the byte test was here it was corrupted by it once per write, forever.
-  Found in review, reproduced live, one line.
-
-  **Then, of the plaintext.** `unseal` answers for all three shapes at once — it
-  opens a ciphertext, hands a plaintext straight back, and hands back an envelope
-  it cannot open as well. So an unchanged value is a no-op on a sealed row, on an
-  unmigrated row, and on a row this client cannot read. This rule used to be
-  written as three branches and they disagreed with the browser's on the third.
-
-  What that keeps working is the server's `content-would-change?`, and with it the
-  version, the history row and — for a machine write — the difference between a
-  direct write and a proposal.
-
-  The unmigrated case is not an optimisation, it is the window the rollout
-  mandates: clients are deployed first and the data is sealed later, so for a
-  while every row is unmigrated. Sealing an unchanged plaintext there would make
-  an agent's idempotent re-`PUT` a version bump, a history row and an inbox entry
-  — audit note A's corruption arriving through the very door the echo rule was
-  built to close. The row seals on its next real edit.
-
-  The unreadable case is the one a wrong or rotated key produces. Sealing there
-  would write `enc_new(enc_old(…))`, and the *next* no-op would nest it again,
-  once per cycle without bound, on a Recipe nobody can read to notice. A no-op
-  stays a no-op, which is what the rule is for.
-
-  **A migration pass must therefore pass `nil` as `stored`**, and this is the one
-  place that trap is written down: a walker that handed the plaintext it just read
-  in as `stored` would be told, correctly, that nothing changed, and would seal
-  nothing at all."
+  `stored` is what that column holds right now, and an unchanged value comes back
+  as exactly those bytes. **A migration pass must pass `nil` as `stored`**, or it
+  will be told, correctly, that nothing has changed and will seal nothing at all."
   ([k table column v] (seal k table column v nil))
   ([k table column v stored]
-   (cond
-     (nil? k) v
-     (blank-value? v) v
-     ;; The bytes, before anything is opened. See the docstring: this is the
-     ;; branch an echoed openable envelope needs, and the one below cannot answer.
-     (= v stored) stored
-     (= v (unseal k table column stored)) stored
-     :else (seal-text k (aad table column) v))))
+   (env/seal-at k (aad table column) v stored)))
 
 ;; ---------------------------------------------------------------------------
 ;; Where the key comes from.
 
 (def key-file
-  "The default place a key file is looked for. Mode 600, like the credentials
-  beside it."
-  (java.io.File. (System/getProperty "user.home") ".config/plurama-cli/cookbook-seal.key"))
+  "The default place cookbook's key file is looked for. Mode 600, like the
+  credentials beside it."
+  (env/default-key-file "cookbook"))
 
-(defn- key-location
-  "Where the key would come from — `[:env NAME]`, `[:file PATH]`, or `nil` for
-  none. Resolved in **one** place, because `load-key` and `key-source` must not
-  be able to disagree about whether sealing is on, and once they did: a
-  `COOKBOOK_SEAL_KEY_FILE` naming a file that was not there left `load-key`
-  answering `nil` while `apps` reported *sealing: on*. That is precisely the
-  shape of lie the `apps` line exists to prevent.
+(def ^:private key-spec
+  "Cookbook's three places, in order: `COOKBOOK_SEAL_KEY` (base64, the shape a
+  `sops exec-env` wrapper hands it over in), `COOKBOOK_SEAL_KEY_FILE` (a path),
+  and the default file — which is the shape a devbox gets it in, a mounted file,
+  the same pattern as `docker/cookbook_creds`.
 
-  Three places, in order:
+  Tracker's key is a different secret in a different file. One envelope, two
+  keys: a leaked key cannot be rotated out of the data it already sealed, and
+  there is no reason to make one leak cost two shelves."
+  {:app "cookbook"
+   :env-var "COOKBOOK_SEAL_KEY"
+   :file-var "COOKBOOK_SEAL_KEY_FILE"
+   :default-file key-file})
 
-  - `COOKBOOK_SEAL_KEY` — base64. The shape a `sops exec-env` wrapper hands it
-    over in on the owner's laptop, where the key lives in `secrets.yaml`.
-  - `COOKBOOK_SEAL_KEY_FILE` — a path to read it from.
-  - `~/.config/plurama-cli/cookbook-seal.key` — the default file, which is the
-    shape a devbox gets it in: a mounted file, the same pattern as
-    `docker/cookbook_creds`.
-
-  **A file somebody named and did not put there throws.** It is a mistake, not a
-  request for plaintext — the same judgement a malformed key gets. The *default*
-  file's absence is not: nothing named it, so nothing is missing, and sealing is
-  simply off."
-  []
-  (let [from-env (System/getenv "COOKBOOK_SEAL_KEY")
-        named (System/getenv "COOKBOOK_SEAL_KEY_FILE")]
-    (cond
-      (not (str/blank? from-env)) [:env "COOKBOOK_SEAL_KEY"]
-
-      (not (str/blank? named))
-      (if (.exists (java.io.File. ^String named))
-        [:file named]
-        (throw (ex-info (str "COOKBOOK_SEAL_KEY_FILE names " named
-                             ", which is not there — cookbook prose would be "
-                             "written in the clear")
-                        {:path named})))
-
-      (.exists key-file) [:file (str key-file)])))
+(defn- key-location [] (env/key-location key-spec))
 
 (defn load-key
   "The key, or `nil` — and `nil` means **sealing is off**, which is cookbook's
-  behaviour before any of this existed and is what every function above already
-  understands. That is deliberate: it keeps the whole thing reversible until the
-  data is migrated, and it lets both worlds be exercised.
-
-  A key that is present but malformed **throws**. Falling back to 'sealing off'
-  there would be the worst of both: an agent writing plaintext into a sealed
-  shelf, and nothing saying so."
+  behaviour before any of this existed. A key that is present but malformed
+  throws. See `seal-envelope/load-key`."
   []
-  (when-let [[kind where] (key-location)]
-    (key-from-base64 (case kind
-                       :env (System/getenv where)
-                       :file (slurp where)))))
+  (env/load-key key-spec))
 
 (defn key-source
   "Where `load-key` would find a **usable** key, in words, for the places this is
-  reported. Never the key itself.
-
-  It loads the key rather than only locating it, because *on* is read as a
-  promise that prose will be sealed, and a five-byte string in
-  `COOKBOOK_SEAL_KEY` locates perfectly and opens nothing. A malformed key
-  throws out of here, which is the answer the caller wants: it is the same
-  refusal every other cookbook call is about to give."
+  reported. Never the key itself. See `seal-envelope/key-source`."
   []
-  (when (load-key) (second (key-location))))
+  (env/key-source key-spec))
 
 ;; ---------------------------------------------------------------------------
 ;; The inventory.
