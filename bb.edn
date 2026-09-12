@@ -17,10 +17,15 @@
 ;; suites refuse to pass without them. They share `seal_envelope.clj`, so an edit
 ;; to the cipher that satisfies one app and not the other cannot get through.
 ;;
-;; The third suite needs `sqlite3` on PATH rather than a checkout: the migration
-;; walker talks to a database file, so what is worth holding still about it is
-;; what it does to rows. It builds its own database and refuses to pass without
-;; the binary, for the same reason.
+;; The third and the fifth need `sqlite3` on PATH rather than a checkout: the two
+;; migration walkers talk to a database file, so what is worth holding still about
+;; them is what they do to rows. They build their own databases and refuse to pass
+;; without the binary, for the same reason.
+;;
+;; The tracker walker is the one that needs both — the sibling checkout for the
+;; rules and the binary for the rows — because the thing it has that cookbook's
+;; does not is a *scope*: three humans live in one tracker database and only one
+;; of them is sealing, so half of what its suite pins is which rows it left alone.
 ;;
 ;; The fourth needs neither. It drives the proxy sidecar's own `handle` against a
 ;; cookbook it starts on a loopback port — the whole path a box's request takes,
@@ -33,13 +38,15 @@
 ;; schema they describe, because the umbrella's Docker build copies `tracker/`
 ;; and does not copy this repo.
 {:paths ["." "test" "../tracker/src/cljc"]
- :tasks {test {:doc "Run the seal suites: the shared test vectors, the pure decisions the seal added to plurama_cli, and the migration walker against a database it builds."
+ :tasks {test {:doc "Run the seal suites: the shared test vectors, the pure decisions the seal added to plurama_cli, and the two migration walkers against databases they build."
                :requires ([clojure.test :as t])
                :task (do (require 'cookbook-seal-test 'tracker-seal-test 'plurama-cli-test
-                                  'cookbook-seal-migrate-test 'plurama-cli-proxy-test)
+                                  'cookbook-seal-migrate-test 'tracker-seal-migrate-test
+                                  'plurama-cli-proxy-test)
                          (let [{:keys [fail error]} (t/run-tests 'cookbook-seal-test
                                                                  'tracker-seal-test
                                                                  'plurama-cli-test
                                                                  'cookbook-seal-migrate-test
+                                                                 'tracker-seal-migrate-test
                                                                  'plurama-cli-proxy-test)]
                            (System/exit (if (zero? (+ fail error)) 0 1))))}}}
