@@ -408,6 +408,26 @@
   (is (nil? (seal/endpoint-table "/api/mottos/2"))
       "same, and for the reason clear-tables gives"))
 
+(deftest a-message-conversion-names-the-table-it-writes-into-and-not-its-own
+  (testing "the two that delete their own original"
+    (is (= :tasks (rules/convert-target "/api/messages/7/convert-to-task")))
+    (is (= :resources (rules/convert-target "/api/messages/7/convert-to-resource"))))
+  (testing "**an issue conversion is not one of them.** It copies ciphertext to
+    ciphertext under the single binding, server-side, and is genuinely fine —
+    catching it here would demand a sealed body the browser has no reason to send."
+    (is (nil? (rules/convert-target "/api/issues/7/convert-to-task"))))
+  (testing "and nothing else is either"
+    (doseq [p ["/api/messages/7" "/api/messages" "/api/tasks/7"
+               "/api/messages/7/convert-to-nothing" "/api/today-board" nil]]
+      (is (nil? (rules/convert-target p)) (str p))))
+  (testing "`endpoint-table` still answers nil for the same path, and must:
+    a message body is never sealed, and its own id is the one in this URL"
+    (is (nil? (seal/endpoint-table "/api/messages/7/convert-to-task")))
+    (is (= 7 (seal/endpoint-id "/api/messages/7/convert-to-task"))
+        "which is the *message's* id — echoing [:tasks 7 :description] against it
+         would seal some unrelated task's ciphertext into the new row, so a
+         convert is treated as the create it is and echoes nothing")))
+
 (deftest an-endpoint-names-the-row-when-it-has-one
   (is (= 123 (seal/endpoint-id "/api/tasks/123")))
   (is (= 9 (seal/endpoint-id "/api/journal-entries/9?detail=full")))
