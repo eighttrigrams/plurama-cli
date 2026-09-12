@@ -7,7 +7,8 @@
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [cookbook-seal :as seal]))
+            [cookbook-seal :as seal]
+            [tracker-seal]))
 
 (def ^:private baked-credentials
   "Base64-encoded EDN, substituted at install time by the private
@@ -200,7 +201,23 @@
   failing on it."
   (delay (seal/load-key)))
 
+(def ^:private tracker-seal-key
+  "Tracker's key, which is **a different secret from cookbook's** and lives in a
+  different file. One envelope, two apps, two keys: a leaked key cannot be
+  rotated out of the data it already sealed, so there is no reason to make one
+  leak cost two shelves. Lazily, for the same reason as above."
+  (delay (tracker-seal/load-key)))
+
 (defn- cookbook? [app] (= "cookbook" app))
+
+(defn- tracker? [app]
+  "Both configured identities that reach tracker's API.
+
+  `tracker-just-msg` is the mail-only machine user, and it is in here for a
+  reason that is easy to miss: **mail-only restricts what it may write, not what
+  it may read.** An agent reading a task through that identity would meet
+  `enc:v1:…` with nothing to say why if this named only `tracker`."
+  (contains? #{"tracker" "tracker-just-msg"} app))
 
 (defn- current-state
   "What the seal needs to know about the row a write is aimed at, out of **one**
@@ -252,6 +269,67 @@
           (if-let [sealed (seal/seal-write k target parsed (current-state cfg token target))]
             (json/generate-string sealed)
             body))))))
+
+(defn- tracker-current-state
+  "What the row a tracker write is aimed at holds right now, out of one plain
+  single-row GET — `{:stored …}`, the shape `tracker-seal/state-of` defines and
+  the proxy sidecar shares. The echo rule's input, and nothing else.
+
+  Anything that goes wrong — a 404, a 401, a body that will not parse — yields
+  `nil`, which means *nothing to echo* and a fresh seal. That is the safe
+  direction: a redundant audit entry is a wart, a refused write is a lost one."
+  [cfg token target]
+  (when-let [path (tracker-seal/state-path target)]
+    (try
+      (let [resp (send-request cfg token {:method :get :path path :headers {}})]
+        (when (= 200 (:status resp))
+          (tracker-seal/state-of target (json/parse-string (:body resp) true))))
+      (catch Exception _ nil))))
+
+(defn- tracker-seal-request-body
+  "Seal the prose of a tracker write. Titles, names, tags, scopes and every flag
+  go as they were given, because they are what the search and the filters are
+  made of.
+
+  A body carrying no prose is returned untouched and asks the server nothing —
+  the guard `tracker-seal/prose-in` exists for, and the one cookbook paid to
+  learn: without it a `-d '{\"tags\":\"x\"}'` would fetch a whole row to look up
+  a ciphertext for a column it is not sending."
+  [cfg token method path body]
+  (let [k @tracker-seal-key
+        target (when (#{:post :put} method) (tracker-seal/write-target (resolve-path path)))]
+    (if-not (and k target body)
+      body
+      (let [parsed (try (json/parse-string body true) (catch Exception _ nil))]
+        (if-not (tracker-seal/prose-in (:table target) parsed)
+          body
+          (if-let [sealed (tracker-seal/seal-write k target parsed
+                                                   (tracker-current-state cfg token target))]
+            (json/generate-string sealed)
+            body))))))
+
+(defn- tracker-unseal-response
+  "Every tracker response, including refusals — a 400 from the seal guard names a
+  column and carries no prose, but a 409 from the optimistic-concurrency guard
+  carries the row that moved, and an agent reading `enc:v1:…` there has been told
+  nothing.
+
+  A response nothing was opened in goes through **byte-identical**: the walk
+  collects only values that actually carry the prefix, so an unsealed database
+  and a keyless run both cost one traversal and no re-serialisation.
+
+  The catch is for a body that says it is JSON and is not. It is **not** what
+  handles a value that will not open — `tracker-seal/unseal` hands those back as
+  they are, so one unreadable body shows beside everything that reads rather than
+  taking the response down with it."
+  [resp]
+  (let [k @tracker-seal-key]
+    (if-not (and k (json-response? resp) (seq (:body resp)))
+      resp
+      (try (let [body (json/parse-string (:body resp) true)
+                 out (tracker-seal/unseal-response-body k body)]
+             (if (= body out) resp (assoc resp :body (json/generate-string out))))
+           (catch Exception _ resp)))))
 
 (defn- refuse-sealed-publish!
   "Publishing hands the prose to somebody who has no key and must never have one,
@@ -420,18 +498,26 @@
   ;; plaintext into a sealed shelf and is told nothing. It names the source and
   ;; never the key. Off is a legitimate state — it is cookbook before any of
   ;; this — so this is a fact and not a warning.
-  (when (:cookbook @credentials)
-    (println)
-    ;; The try is so a misconfigured key file does not cost the reader the app
-    ;; table above it. It still says what is wrong, on the line whose whole job
-    ;; is to say what is true about sealing.
-    (try
-      (if-let [source (seal/key-source)]
-        (println (str "cookbook prose sealing: on, key from " source))
-        (println (str "cookbook prose sealing: off — no key. Set COOKBOOK_SEAL_KEY, or put one at "
-                      seal/key-file)))
-      (catch Exception e
-        (println (str "cookbook prose sealing: misconfigured — " (ex-message e)))))))
+  (let [lines (cond-> []
+                (:cookbook @credentials)
+                (conj ["cookbook" #(seal/key-source) "COOKBOOK_SEAL_KEY" seal/key-file])
+
+                (some @credentials [:tracker :tracker-just-msg])
+                (conj ["tracker" #(tracker-seal/key-source) "TRACKER_SEAL_KEY"
+                       tracker-seal/key-file]))]
+    (when (seq lines)
+      (println))
+    (doseq [[app source-fn env-var default-file] lines]
+      ;; The try is so a misconfigured key file does not cost the reader the app
+      ;; table above it. It still says what is wrong, on the line whose whole job
+      ;; is to say what is true about sealing.
+      (try
+        (if-let [source (source-fn)]
+          (println (str app " prose sealing: on, key from " source))
+          (println (str app " prose sealing: off — no key. Set " env-var ", or put one at "
+                        default-file)))
+        (catch Exception e
+          (println (str app " prose sealing: misconfigured — " (ex-message e))))))))
 
 (defn- run [app path opts]
   (let [cfg (app-config app)
@@ -465,12 +551,15 @@
                              (seal/publish-target (resolve-path path)))]
             (refuse-sealed-publish! cfg token id))
         req (cond-> req
-              (cookbook? app) (update :body #(seal-request-body cfg token method path %)))
+              (cookbook? app) (update :body #(seal-request-body cfg token method path %))
+              (tracker? app) (update :body #(tracker-seal-request-body cfg token method path %)))
         resp (let [r (send-request cfg token req)]
                (if (and login-auth? (= 401 (:status r)))
                  (send-request cfg (login! app cfg) req)
                  r))
-        resp (cond-> resp (cookbook? app) unseal-response)]
+        resp (cond-> resp
+               (cookbook? app) unseal-response
+               (tracker? app) tracker-unseal-response)]
     (print-response resp opts)
     (if (<= 200 (:status resp) 299) 0 1)))
 

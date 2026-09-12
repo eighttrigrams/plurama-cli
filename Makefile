@@ -69,10 +69,62 @@ DIST ?= target
 # are the ones nobody runs against a built artifact.
 #
 # $(1) namespace, $(2) output path
+# The uberscript's classpath is spelled here and **not** taken from bb.edn:
+# `bb --classpath` replaces the path rather than adding to it, so a namespace
+# reachable when you run the suite can be invisible when you build the binary.
+# `assert-complete` below is what stops that being quiet, and says how it failed.
+#
+# ../tracker/src/cljc is tracker's shared seal rules — the inventory, the
+# binding, the payload shapes — which its server, its browser and this repo all
+# read. See bb.edn for why they live in the app and not here.
+FLATTEN_CP := .:../tracker/src/cljc
+
+# Every namespace the flattened script *requires* must be either defined in it
+# or provided by babashka itself. Nothing else is acceptable in a file whose
+# whole purpose is to run where this directory does not exist.
+#
+# The failure this catches is quiet by default: `bb uberscript` prints one
+# "Ignoring expression while assembling uberscript" line among the build output
+# and then emits a script whose `tracker-seal` refers to an `et.tr.seal-rules`
+# that is not in it. It ran, exited 0, and would have failed the first time an
+# agent wrote a task body.
+#
+# **The check must not be derived from FLATTEN_CP**, which was the first version
+# and was worse than none: dropping a root from the classpath also dropped it
+# from the things being asked about, so the one mistake it existed to catch made
+# it pass. Instead the requires are read out of the artifact, and anything the
+# artifact does not define is offered to a babashka with **no classpath at all**.
+# If that bb can load it, it is a runtime namespace and fine; if it cannot, it is
+# ours and it is missing. No denylist of `clojure.*` / `babashka.*` to keep up to
+# date, and no way to make the check pass by breaking the build.
+#
+# $(1) built artifact
+define assert-complete
+@needed=$$(bb -e '(require (quote [clojure.string :as s])) \
+  (let [forms (read-string (str "[" (slurp "$(1)") "]")) \
+        nses (filter #(and (seq? %) (= (quote ns) (first %))) forms) \
+        defined (set (map second nses)) \
+        required (set (for [n nses, c (drop 2 n) \
+                            :when (and (seq? c) (= :require (first c))) \
+                            spec (rest c)] \
+                        (if (vector? spec) (first spec) spec)))] \
+    (println (s/join " " (sort (remove defined required)))))'); \
+ missing=""; \
+ for n in $$needed; do \
+   bb --classpath "" -e "(require '$$n)" >/dev/null 2>&1 || missing="$$missing $$n"; \
+ done; \
+ if [ -n "$$missing" ]; then \
+   echo "$(1): requires namespaces it does not contain and bb cannot provide:$$missing" >&2; \
+   echo "FLATTEN_CP is probably missing a source root -- see the note above it." >&2; \
+   exit 1; \
+ fi
+endef
+
 define flatten
 @mkdir -p $(dir $(2))
-bb --classpath . uberscript $(2).tmp -e "(require '[$(1)])"
+bb --classpath $(FLATTEN_CP) uberscript $(2).tmp -e "(require '[$(1)])"
 @printf '#!/usr/bin/env bb\n' | cat - $(2).tmp > $(2)
+$(call assert-complete,$(2))
 @rm -f $(2).tmp
 @chmod +x $(2)
 endef
@@ -122,17 +174,18 @@ endef
 # the walker's text is a closed step.
 dist: $(DIST)/plurama-cli $(DIST)/cookbook-tui $(DIST)/cookbook-seal-migrate
 
-$(DIST)/plurama-cli: plurama_cli.clj cookbook_seal.clj
+$(DIST)/plurama-cli: plurama_cli.clj cookbook_seal.clj tracker_seal.clj seal_envelope.clj \
+                     ../tracker/src/cljc/et/tr/seal_rules.cljc
 	$(call flatten,plurama-cli,$@)
 	$(call assert-marker,$@)
 
-$(DIST)/cookbook-tui: cookbook_tui.clj cookbook_seal.clj
+$(DIST)/cookbook-tui: cookbook_tui.clj cookbook_seal.clj seal_envelope.clj
 	$(call flatten,cookbook-tui,$@)
 	$(call assert-marker,$@)
 
 # No marker here: the walker takes no credentials. Its key comes from the
 # environment or a file at run time, and it refuses to run without one.
-$(DIST)/cookbook-seal-migrate: cookbook_seal_migrate.clj cookbook_seal.clj
+$(DIST)/cookbook-seal-migrate: cookbook_seal_migrate.clj cookbook_seal.clj seal_envelope.clj
 	$(call flatten,cookbook-seal-migrate,$@)
 
 # ---------------------------------------------------------------------------
