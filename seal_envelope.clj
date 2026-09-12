@@ -290,12 +290,36 @@
   **A migration pass must therefore pass `nil` as `stored`**, and this is one of
   the two places that trap is written down: a walker that handed in the plaintext
   it just read as `stored` would be told, correctly, that nothing changed, and
-  would seal nothing at all."
+  would seal nothing at all.
+
+  ## And an envelope is never sealed, whatever is stored
+
+  Both halves of the echo rule need a `stored` to compare against, and there is a
+  case where there is none: `stored` is `nil` — a create, a client that never read
+  the row, a stale index — and `v` already carries the prefix. Neither comparison
+  can answer, so before this branch existed the value fell through to `seal-text`
+  and was sealed a second time.
+
+  There is no reading of that case in which sealing is right. **A client only ever
+  holds an envelope because it read one**, so handing it back is what *has* not
+  changed, and what comes back out of a second seal is `enc(enc(…))`: it opens
+  once into an envelope, reads as an envelope, and nothing anywhere reports an
+  error. If the envelope is one this key cannot open, sealing it makes it
+  unopenable under two keys rather than one.
+
+  This does not soften the proxy, which is the one place a *foreign* envelope is a
+  real possibility. `plurama-cli-proxy/foreign-envelopes` refuses those before
+  anything gets here, by comparing against `stored` exactly as this does, and it
+  must keep doing so: the question there is not *should this be sealed again* but
+  *whose key sealed it*, and that is not a question this function can be asked."
   ([k aad-str v] (seal-at k aad-str v nil))
   ([k aad-str v stored]
    (cond
      (nil? k) v
      (blank-value? v) v
+     ;; An envelope, before anything is compared: nothing here has any business
+     ;; sealing one, and the two rules below cannot answer when `stored` is nil.
+     (sealed? v) v
      ;; The bytes, before anything is opened. See the docstring: this is the
      ;; branch an echoed openable envelope needs, and the one below cannot answer.
      (= v stored) stored

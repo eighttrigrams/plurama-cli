@@ -235,10 +235,19 @@
           other (seal/seal k :recipes :description "a value from somewhere else")
           out (seal/seal k :recipes :description other stored)]
       (is (not= stored out))
-      (is (seal/sealed? (seal/unseal k :recipes :description out))
-          "and it nests, because that is what writing an envelope as prose means —
-           this is nit 9 and is still deliberately not guarded here; what guards it
-           is the proxy's refusal and, since this round, `--verify`"))))
+      (is (= other out)
+          "**and it no longer nests** — this assertion used to read the other way.
+           Nit 9 was recorded here as deliberately unguarded, on the grounds that
+           the proxy's refusal and `--verify` catch it; tracker's review found the
+           same shape reachable with no proxy in front of it at all, from a
+           browser that had read a ciphertext and handed it back with nothing
+           stored to compare it against. So `seal-envelope/seal-at` now hands an
+           envelope back rather than sealing it, and this is where cookbook says
+           so. The guards downstream are unchanged and still want to exist: what
+           they answer is *whose key sealed this*, which is not a question the
+           rule above can be asked.")
+      (is (= "a value from somewhere else" (seal/unseal k :recipes :description out))
+          "one open reaches the prose, which is what nesting broke"))))
 
 (deftest an-unopenable-stored-value-does-not-block-the-write
   (let [k (test-key)

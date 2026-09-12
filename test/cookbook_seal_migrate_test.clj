@@ -104,6 +104,18 @@
 
 (defn- sealed [k table column text] (seal/seal k table column text))
 
+(defn- nested
+  "`enc(enc(prose))`, built at the envelope level on purpose.
+
+  It is what a client that sealed a ciphertext it had echoed used to produce, and
+  **no correct client can produce one any more**: `seal-envelope/seal-at` hands an
+  envelope straight back rather than sealing it, whatever is stored. So a fixture
+  that needs one has to reach past the rules and make it by hand — which is the
+  right shape for a fixture of a corruption. The walker still has to see it,
+  because the databases that already hold one are the reason the bucket exists."
+  [k table column text]
+  (seal/seal-text k (seal/aad table column) (sealed k table column text)))
+
 (defn- fresh-db
   "A database with one row of every shape the walker has an opinion about."
   []
@@ -435,10 +447,10 @@
     Before this round `--verify` opened it once, found an envelope, called it
     sealed and printed *The invariant holds.* — over prose a reader meets as
     `enc:v1:…`."
-    (let [db (clean-db)
-          once (sealed @test-key :recipes :description "the prose under two layers")]
+    (let [db (clean-db)]
       (insert! db :recipes {:id 91 :title "nested"
-                            :description (sealed @test-key :recipes :description once)
+                            :description (nested @test-key :recipes :description
+                                                 "the prose under two layers")
                             :useful_when "plain" :reason nil :context nil})
       (let [{:keys [exit out]} (run-script "--verify" db)]
         (is (= 1 exit))

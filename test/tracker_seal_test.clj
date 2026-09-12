@@ -225,6 +225,27 @@
     (is (= "a body" (seal/unseal k :tasks :description out))
         "and so it is not enc(enc(…)), which would open once into an envelope")))
 
+(deftest an-envelope-with-nothing-to-compare-it-against-is-still-not-sealed-again
+  (let [k (test-key)
+        stored (seal/seal k :tasks :description "a body" nil)]
+    (testing "nothing stored at all — a create, or a client that never read the row"
+      (let [out (seal/seal k :tasks :description stored nil)]
+        (is (= stored out)
+            "a client only ever holds an envelope because it read one")
+        (is (= "a body" (seal/unseal k :tasks :description out))
+            "one open and the body — not a second envelope")))
+    (testing "a stored value that is stale, or some other row's"
+      (let [other (seal/seal k :tasks :description "something else" nil)
+            out (seal/seal k :tasks :description stored other)]
+        (is (= stored out))
+        (is (= "a body" (seal/unseal k :tasks :description out)))))
+    (testing "an envelope this key cannot open, with nothing stored"
+      (let [foreign (seal/seal (seal/key-from-base64 (:other-key-base64 @fixture))
+                               :tasks :description "someone else's key" nil)
+            out (seal/seal k :tasks :description foreign nil)]
+        (is (= foreign out)
+            "sealing it would make it unopenable under two keys instead of one")))))
+
 (deftest an-unchanged-value-on-an-unmigrated-row-stays-plaintext
   (let [k (test-key)]
     (is (= "not migrated yet" (seal/seal k :tasks :description "not migrated yet" "not migrated yet"))
