@@ -2,7 +2,7 @@
 
 # Where `dist` writes. **A directory, not a file** — which is the one place this
 # diverges from `us-vs-them/Makefile`, whose `DIST` names the single script it
-# builds. There are three here, and the private deploy script wants them side by
+# builds. There are four here, and the private deploy script wants them side by
 # side in a staging directory it then bakes credentials into, so
 # `make dist DIST=$STAGE` is the call that matters and it has to be able to name
 # a place rather than a file.
@@ -45,7 +45,7 @@ DIST ?= target
 # `(apply et.uvt.cli/-main *command-line-args*)` to the end of the collected
 # file. That is right there, because `cli.clj` has a `-main` and nothing else.
 #
-# All three scripts here end instead in the self-invoking guard
+# All four scripts here end instead in the self-invoking guard
 #
 #     (when (= *file* (System/getProperty "babashka.file"))
 #       (apply -main *command-line-args*))
@@ -57,11 +57,11 @@ DIST ?= target
 # the appended form.
 #
 # `plurama_cli.clj` gets away with that by accident: every branch of its `-main`
-# ends in `System/exit`, so the process is gone before the second call. The other
-# two do not. A `-m` build of `cookbook_tui.clj` prints `bye`, returns from
-# `-main`, and **starts the TUI again** — measured, not reasoned: `q` twice
-# gives two `bye`s from a `-m` build and one from this one. A `-m` build of the
-# walker would print its help twice.
+# ends in `System/exit`, so the process is gone before the second call. The others
+# do not. A `-m` build of `cookbook_tui.clj` prints `bye`, returns from `-main`,
+# and **starts the TUI again** — measured, not reasoned: `q` twice gives two
+# `bye`s from a `-m` build and one from this one. A `-m` build of either walker
+# would print its help twice.
 #
 # So the entry point stays the guard the sources already have, and `-e` is how
 # `uberscript` is told which namespaces to collect without also being told to
@@ -158,21 +158,30 @@ endef
 # times over, from this one artifact: the full map, a restricted map for the
 # devboxes, and the proxy's.
 #
-# The third, `cookbook-seal-migrate`, is **not** installed, and the README says
-# why: "it is not a thing anybody runs twice." It is built anyway, for one
-# reason — it requires the seal like the other two, so it has the same problem,
-# and it is the one irreversible operation in the project. It runs against a
-# database *file*, which means it runs wherever that file is, and needing a
-# checkout (plus `bb.edn`, plus a working directory) at that moment is a
+# The other two, the **migration walkers**, are not installed, and the README says
+# why: "it is not a thing anybody runs twice." They are built anyway, for one
+# reason — they require the seal like the other two, so they have the same
+# problem, and they are the irreversible operations in the project. They run
+# against a database *file*, which means they run wherever that file is, and
+# needing a checkout (plus `bb.edn`, plus a working directory) at that moment is a
 # constraint that buys nothing. A single script you can `scp` next to the
 # backup you are about to seal is the better shape. The deploy script names what
 # it installs, so an extra file in the staging directory costs nothing.
 #
-# Note for whoever ships it: its `--help` still says `bb cookbook_seal_migrate.clj
-# … DATABASE`, because that is the invocation the README documents. The built
-# artifact is invoked by its own name. Left alone rather than fixed here, since
-# the walker's text is a closed step.
-dist: $(DIST)/plurama-cli $(DIST)/cookbook-tui $(DIST)/cookbook-seal-migrate
+# `tracker-seal-migrate` needs one thing cookbook's does not: `et.tr.seal-rules`,
+# out of the sibling tracker checkout. It is already on `FLATTEN_CP`, because
+# `plurama-cli` needs it too — and `assert-complete` is what says so if it ever
+# stops being: the artifact's own `(require …)` forms are offered to a babashka
+# with no classpath at all, and this one would fail on the namespace that carries
+# the nine sealed columns and the five payload shapes.
+#
+# Note for whoever ships them: their `--help` still says `bb
+# cookbook_seal_migrate.clj … DATABASE`, and `bb tracker_seal_migrate.clj --user
+# NAME … DATABASE`, because those are the invocations the README and the playbook
+# document. The built artifacts are invoked by their own names. Left alone rather
+# than fixed here, since the walkers' text is a closed step.
+dist: $(DIST)/plurama-cli $(DIST)/cookbook-tui $(DIST)/cookbook-seal-migrate \
+      $(DIST)/tracker-seal-migrate
 
 $(DIST)/plurama-cli: plurama_cli.clj cookbook_seal.clj tracker_seal.clj seal_envelope.clj \
                      ../tracker/src/cljc/et/tr/seal_rules.cljc
@@ -183,10 +192,15 @@ $(DIST)/cookbook-tui: cookbook_tui.clj cookbook_seal.clj seal_envelope.clj
 	$(call flatten,cookbook-tui,$@)
 	$(call assert-marker,$@)
 
-# No marker here: the walker takes no credentials. Its key comes from the
-# environment or a file at run time, and it refuses to run without one.
+# No marker on either walker: they take no credentials. The key comes from the
+# environment or a file at run time, and they refuse to run without one — which
+# is the one thing they do differently from every other client here.
 $(DIST)/cookbook-seal-migrate: cookbook_seal_migrate.clj cookbook_seal.clj seal_envelope.clj
 	$(call flatten,cookbook-seal-migrate,$@)
+
+$(DIST)/tracker-seal-migrate: tracker_seal_migrate.clj tracker_seal.clj seal_envelope.clj \
+                              ../tracker/src/cljc/et/tr/seal_rules.cljc
+	$(call flatten,tracker-seal-migrate,$@)
 
 # ---------------------------------------------------------------------------
 # Installing from here installs the tools **unbaked**, which is a real thing to
@@ -231,5 +245,7 @@ test:
 # path is a footgun waiting for the one time it names a directory with something
 # else in it.
 clean:
-	rm -f $(DIST)/plurama-cli $(DIST)/cookbook-tui $(DIST)/cookbook-seal-migrate
-	rm -f $(DIST)/plurama-cli.tmp $(DIST)/cookbook-tui.tmp $(DIST)/cookbook-seal-migrate.tmp
+	rm -f $(DIST)/plurama-cli $(DIST)/cookbook-tui $(DIST)/cookbook-seal-migrate \
+	      $(DIST)/tracker-seal-migrate
+	rm -f $(DIST)/plurama-cli.tmp $(DIST)/cookbook-tui.tmp $(DIST)/cookbook-seal-migrate.tmp \
+	      $(DIST)/tracker-seal-migrate.tmp
