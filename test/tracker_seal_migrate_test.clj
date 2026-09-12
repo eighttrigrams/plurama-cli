@@ -696,7 +696,7 @@
       (let [{:keys [exit out]} (run-script "--user" "daniel" db)]
         (is (= 1 exit) "a run over a database with an unfinished write is not a clean answer")
         (is (str/includes? out "sat beside this database"))
-        (is (str/includes? out "never copy the .db anywhere while one is there")))
+        (is (str/includes? out "Never copy the .db anywhere")))
       (is (empty? (sidecars db)) "opening the database was the repair")
       (is (= 0 (:exit (run-script "--user" "daniel" db)))
           "and the next run, over the repaired file, is the one to trust"))))
@@ -814,10 +814,7 @@
           {:keys [exit]} (p/shell {:out :string :err :string :continue true :dir repo-root
                                    :extra-env {"TRACKER_SEAL_KEY" @test-key-base64}}
                                   "timeout" "-s" "KILL" half "bb" "tracker_seal_migrate.clj"
-                                  "--user" "daniel" victim)
-          ;; **Taken before the first `sqlite3` call**, as the walker itself takes
-          ;; it, because opening a database for writing is what clears a journal.
-          strays (sidecars victim)]
+                                  "--user" "daniel" victim)]
       (is (= 137 exit) "SIGKILL, which is the one signal nothing can clean up after")
       (let [part (sealed-in victim)]
         (is (pos? part) "the kill landed after some rows were written")
@@ -826,23 +823,35 @@
         (is (= 1 exit) "a half-sealed database does not satisfy the invariant")
         (is (str/includes? out "PLAINTEXT") "and says which values are the reason"))
 
-      ;; **A killed pass usually leaves a `-journal` beside the file**, and this is
-      ;; the shape an interrupted cutover actually has: the kill lands on `bb`, the
-      ;; `sqlite3` it had started dies with it, and the journal it had opened stays
-      ;; there until something opens the database *for writing*. A read does not
-      ;; clear it — the count above did not.
+      ;; **A killed pass leaves a `-journal` beside the file, in one of two
+      ;; shapes**, and this is what an interrupted cutover actually looks like: the
+      ;; kill lands on `bb`, the `sqlite3` it had started dies with it, and what it
+      ;; leaves depends on how far into its one write it had got.
       ;;
-      ;; So the first run over it repairs it, does its work, and still answers
-      ;; non-zero, because the procedure's next step is *copy the file* and the run
-      ;; that repaired a journal is not the run whose output to trust. The run
-      ;; after it is. That is the whole of the playbook's rule, arrived at here by
-      ;; killing something rather than by writing a file called `-journal`.
-      (if (seq strays)
-        (do (is (= 1 (:exit (run-script "--user" "daniel" victim)))
-                "the run that repairs a journal does not report a clean pass")
-            (is (empty? (sidecars victim)) "and opening it for writing was the repair"))
-        (is (= 0 (:exit (run-script "--user" "daniel" victim)))
-            "a kill that happened to land between writes leaves nothing to repair"))
+      ;;   *hot* — bytes and a valid header. The database file is already modified
+      ;;   and the pre-images are in the journal, so the **first connection to open
+      ;;   the database at all, reader or writer, rolls it back and deletes it**.
+      ;;   The count above is such a connection, so this often repairs itself.
+      ;;
+      ;;   *not hot* — created and not yet written, so zero length. SQLite ignores
+      ;;   it, a read leaves it exactly there, and `sidecars` does not call it a
+      ;;   stray, because it holds nothing the `.db` does not.
+      ;;
+      ;; Which of the two is there is a matter of microseconds, so the state is
+      ;; **taken immediately before the run it describes** and with no `sqlite3`
+      ;; call in between — the same discipline the walker keeps, and for the same
+      ;; reason. A run that does meet one exits non-zero having done its work,
+      ;; because the procedure's next step is *copy the file* and the run that
+      ;; repaired a journal is not the run whose output to trust. The run after it
+      ;; is. That is the playbook's rule, arrived at by killing something rather
+      ;; than by writing a file called `-journal`.
+      (let [strays (sidecars victim)
+            {:keys [exit]} (run-script "--user" "daniel" victim)]
+        (if (seq strays)
+          (do (is (= 1 exit) "the run that repairs a journal does not report a clean pass")
+              (is (empty? (sidecars victim)) "and opening it for writing was the repair"))
+          (is (= 0 exit)
+              "nothing was left holding state the .db does not, so there is nothing to repair")))
 
       (is (= 0 (:exit (run-script "--user" "daniel" victim))) "the resumed pass is clean")
       (is (= total (sealed-in victim)))
@@ -852,6 +861,41 @@
       (is (= (opened control) (opened victim))
           "and what the resumed pass left is what an uninterrupted one would have —
            compared opened, because two correct passes cannot be compared sealed"))))
+
+(deftest a-sidecar-is-judged-by-its-bytes-and-not-by-its-name
+  (testing "**the bug this replaced.** `sidecars` asked whether a file called
+    `-journal` or `-wal` existed, and the two mean opposite things: an interrupted
+    write, and the ordinary resting state of a WAL database. `wal_checkpoint`
+    truncates a `-wal` to zero bytes *without removing it*, and whether the empty
+    file then survives the connection closing is the platform's business — this
+    box's sqlite3 deletes it, a build with `SQLITE_FCNTL_PERSIST_WAL` keeps it. So
+    the pass answered 0 on one machine and 1 on the other over the same database,
+    and this suite was green here and red where it was read.
+
+    The question is whether the file holds anything the `.db` does not, and the
+    answer is its length."
+    (let [db (str (tmp-db "tracker-seal-walk-sidecars"))]
+      (sqlite! db schema)
+      (is (= [] (sidecars db)) "nothing beside it")
+      (spit (str db "-wal") "")
+      (is (= [] (sidecars db)) "a zero-length -wal is what a checkpoint leaves: healthy")
+      (spit (str db "-journal") "")
+      (is (= [] (sidecars db))
+          "and a zero-length -journal holds no pre-images — SQLite does not call
+           one hot either, and journal_mode=truncate rests exactly there")
+      (spit (str db "-wal") "pages this database has and the .db does not")
+      (is (= ["-wal"] (sidecars db)))
+      (spit (str db "-journal") "the pre-images of a write that did not finish")
+      (is (= ["-journal" "-wal"] (sidecars db)) "named in a fixed order")
+      (spit (str db "-wal") "")
+      (is (= ["-journal"] (sidecars db)))))
+
+  (testing "and a -shm is never one: it is an index rebuilt from the -wal, it
+    holds nothing that is not elsewhere, and a read is enough to make one"
+    (let [db (str (tmp-db "tracker-seal-walk-shm"))]
+      (sqlite! db schema)
+      (spit (str db "-shm") "32768 bytes of shared-memory index, in spirit")
+      (is (= [] (sidecars db))))))
 
 (deftest a-wal-database-has-its-pages-folded-back-in-before-the-pass-says-it-is-done
   (testing "tracker is in `delete` mode today, which is exactly the kind of thing
@@ -870,4 +914,30 @@
         (is (= 0 exit))
         (is (str/includes? out "WAL checkpointed")))
       (is (= "1" (flag db "daniel")))
-      (is (empty? (sidecars db))))))
+      (is (empty? (sidecars db)))
+
+      (testing "**and a zero-length -wal left beside it stops nothing.** This is
+        the platform difference written down as a test: where sqlite3 keeps the
+        truncated file, every one of the assertions above used to fail — the pass
+        exited 1 over its own healthy checkpoint, which made `--verify` exit 1 and
+        `--arm` refuse, so the flag stayed 0 and the cutover could not finish."
+        (spit (str db "-wal") "")
+        (is (= 0 (:exit (run-script "--verify" "--user" "daniel" db))))
+        (spit (str db "-wal") "")
+        (is (= 0 (:exit (run-script "--user" "daniel" db))))
+        (spit (str db "-wal") "")
+        (is (= 0 (:exit (run-script "--arm" "--user" "daniel" db)))))
+
+      (testing "**a -wal with bytes in it is the dangerous case and still stops
+        everything.** Pages the `.db` alone does not hold, whether they arrived
+        from a copy taken live or from a checkpoint that could not complete
+        because something else is holding the WAL open."
+        (spit (str db "-wal") "bytes that are not in the .db")
+        (let [{:keys [exit out]} (run-script "--verify" "--user" "daniel" db)]
+          (is (= 1 exit))
+          (is (str/includes? out "sat beside this database with bytes in it"))
+          (is (str/includes? out "pages this database has and the .db file alone does")))
+        (spit (str db "-wal") "bytes that are not in the .db")
+        (is (= 1 (:exit (run-script "--user" "daniel" db)))
+            "a pass over it is not a clean answer either, and the run after it is")
+        (is (= 0 (:exit (run-script "--user" "daniel" db))))))))

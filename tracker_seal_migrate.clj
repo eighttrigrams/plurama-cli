@@ -814,32 +814,59 @@
       (throw (ex-info (str "not a tracker database: no " (str/join ", " missing)) {})))))
 
 (defn- sidecars
-  "The journal files sitting beside a database, if any.
+  "The files beside a database that **hold state the `.db` alone does not**, named
+  by their suffix.
 
-  **This is the one way an interrupted pass can become a damaged production
-  file**, and it is not the pass's doing — it is what happens next. In
-  `journal_mode=delete`, which is what tracker uses, an interrupted write leaves a
-  `-journal` holding the pre-images while the database file itself is already
-  modified. The file alone is then either torn or silently different from what the
-  pass committed, and the procedure's next step is *push it back*.
+  ## The distinction is the bytes, not the filename
 
-  Opening the database repairs it: sqlite3 rolls the journal back and deletes it,
-  which is why re-running the pass in place is the recovery. What must never
-  happen is a copy taken while the journal is there. So: named on the way in, and
-  refused on the way out.
+  It is tempting to write this as *is there a file called `-journal` or `-wal`
+  next to it*, and that is wrong in a way that only shows up on somebody else's
+  machine. The two suffixes mean opposite things:
 
-  **`filterv` and not `filter`, and that is not style.** The answer has to be
+  - a **`-journal`** beside a `journal_mode=delete` database is an interrupted
+    write. It holds the pre-images, the `.db` is already modified, and the file
+    alone is either torn or silently different from what was committed. Refusing
+    is the whole point.
+  - a **`-wal`** beside a `journal_mode=wal` database is the ordinary resting
+    state. `PRAGMA wal_checkpoint(TRUNCATE)` folds its pages into the `.db` and
+    **truncates it to zero bytes without removing it** — and whether the empty
+    file then survives the connection closing is the platform's business. This
+    box's sqlite3 deletes it; a build with `SQLITE_FCNTL_PERSIST_WAL` keeps it.
+    Both are healthy, and a pass that called one of them a stray would exit 1 on
+    one machine and 0 on the other over the same database.
+
+  So the question is *does this file hold anything the database file does not*,
+  and the answer is its length. A zero-length sidecar holds nothing — which is
+  also true of the `-journal` that `journal_mode=truncate` leaves at rest, and of
+  the one a process can leave behind by dying after creating the file and before
+  writing a header, which SQLite itself does not consider hot.
+
+  `-shm` is deliberately not here: it is a shared-memory index rebuilt from the
+  `-wal`, it never holds anything that is not elsewhere, and a read is enough to
+  create one.
+
+  **`vec` and not a lazy seq, and that is not style.** The answer has to be
   *taken* before the first `sqlite3` invocation, not merely asked for: a lazy seq
   realised one line later is realised after the database has been opened, the
   journal rolled back and the file deleted — and then the note never prints."
   [db]
-  (filterv #(.exists (java.io.File. (str db %))) ["-journal" "-wal"]))
+  (vec (for [suffix ["-journal" "-wal"]
+             :let [f (java.io.File. (str db suffix))]
+             :when (and (.isFile f) (pos? (.length f)))]
+         suffix)))
 
 (defn- checkpoint!
   "A WAL database keeps the newest pages in a sidecar file. Copying the `.db`
   alone after a pass would leave the sealing behind — so the pass folds it in
   before it says it is done, and says which mode it found. Tracker is in
-  `delete` mode today, which is exactly the kind of thing that changes once."
+  `delete` mode today, which is exactly the kind of thing that changes once.
+
+  `TRUNCATE` empties the `-wal` rather than removing it, and that zero-length
+  file is the healthy resting state — see `sidecars`, which is why this runs
+  *before* the sidecars are counted for the last time and not after. A `-wal`
+  that still has bytes in it once this has run is a real answer and not a
+  filename: something else is holding the WAL open, and a TRUNCATE checkpoint
+  cannot complete while a reader has a snapshot in it."
   [db]
   (when (= "wal" (str/lower-case (str/trim (str (one db "PRAGMA journal_mode;")))))
     (sqlite! db "PRAGMA wal_checkpoint(TRUNCATE);")
@@ -951,18 +978,26 @@
   (when foreign
     (println (format "  %-10s %s belonging to other users, and not read" "elsewhere"
                      (plural (reduce + (map :rows foreign)) "row"))))
-  ;; **A journal beside the file is a database that has not finished a write**,
-  ;; almost always this pass being interrupted. By now it is gone:
-  ;; `check-database!` opened the file, which rolls it back — the repair. What is
-  ;; left to do is say so, because the procedure's next step is to copy the file
-  ;; somewhere, and the operator has to know that the run which repaired it is not
-  ;; the run whose output they should trust.
+  ;; **A sidecar with bytes in it is state the `.db` alone does not hold** — see
+  ;; `sidecars` for why the length and not the filename is the question. By the
+  ;; time this prints, a journal is already gone: `check-database!` opened the
+  ;; file, which rolls it back, and that is the repair. What is left to do is say
+  ;; so, because the procedure's next step is to copy the file somewhere, and the
+  ;; operator has to know that the run which repaired it is not the run whose
+  ;; output they should trust.
   (when (seq strays)
     (println (format "  %-10s %s" "NOTE"
-                     (str "a " (str/join " and a " strays) " sat beside this database:")))
-    (println "             an unfinished write, whose pre-images the database file alone does")
-    (println "             not hold. Opening it has now rolled that back, which is the repair —")
-    (println "             but never copy the .db anywhere while one is there. This run")
+                     (str "a " (str/join " and a " strays)
+                          " sat beside this database with bytes in it:")))
+    (when (some #{"-journal"} strays)
+      (println "             a -journal holds the pre-images of a write that did not finish, so")
+      (println "             the database file alone is either torn or not what was committed.")
+      (println "             Opening it has now rolled that back, which is the repair."))
+    (when (some #{"-wal"} strays)
+      (println "             a -wal holds pages this database has and the .db file alone does")
+      (println "             not. A pass folds them in before it finishes; a read-only mode")
+      (println "             leaves them exactly where they are."))
+    (println "             Never copy the .db anywhere while one of those is there. This run")
     (println "             therefore exits non-zero: run it again, and copy nothing until it")
     (println "             answers 0 with no note here.")))
 
@@ -1034,7 +1069,10 @@
                 (println)
                 (println "  WAL checkpointed into the database file."))
               (println)
-              (System/exit (if (seq strays-before) 1 0))))
+              ;; Its own exit, and the same rule as the walking modes': a sidecar
+              ;; with bytes in it before or after means the file is not one to
+              ;; copy, whatever this run did to the flag.
+              (System/exit (if (seq (concat strays-before (sidecars db))) 1 0))))
           (when (:verbose opts) (println))
           (let [{:keys [by-table total]} (run-walk {:db db :direction direction
                                                     :mode (if (= :arm mode) :verify mode)
@@ -1049,17 +1087,19 @@
                 ;; What stops the pass from claiming to be finished. Every one of
                 ;; them is a value that should have ended sealed, or ended in the
                 ;; clear, and did not — which is exactly what nobody would notice.
+                ;; A sidecar with bytes in it is unfinished in the most literal
+                ;; sense, and the one state whose danger is in what the operator
+                ;; does next. It counts whether or not this run repaired it: the
+                ;; operator must be made to run again rather than proceed to
+                ;; *push* on the strength of the run that did the repairing.
+                ;;
+                ;; **The state this run *leaves* is asked for after the
+                ;; checkpoint, not here.** A pass over a WAL database has its own
+                ;; freshly written pages in the `-wal` at this moment, and asking
+                ;; now would have every WAL pass report the work it had just done
+                ;; as something left behind — and exit 1 over it.
                 unfinished (+ unopenable odd nested unwalked (count moved) (count elsewhere)
-                              ;; A journal is unfinished in the most literal sense,
-                              ;; and the one state whose danger is in what the
-                              ;; operator does next. Counted whether it was there
-                              ;; when this run started — in which case this run
-                              ;; repaired it, and the operator must be made to run
-                              ;; again rather than proceed to *push* on the strength
-                              ;; of the run that did the repairing — or is there
-                              ;; still.
-                              (count strays-before)
-                              (count (sidecars db)))]
+                              (count strays-before))]
             (print-counts (if (= :arm mode) :verify mode) direction
                           (into {} (for [[t c] by-table]
                                      [t (dissoc c :violations :moved :rows)])))
@@ -1147,23 +1187,30 @@
               (println "  them: they are outside the scope in both directions. A keyed client wrote")
               (println "  them, which the server's guard refuses for an unarmed user — so find out")
               (println "  which client, and unseal them with the key that sealed them."))
-            ;; **After the pass.** Nearly unreachable, and kept anyway: every mode
-            ;; opens the database and so rolls back and deletes any journal that
-            ;; was there. What could still leave one here is something *else*
-            ;; writing while this ran and dying, and the answer is the same — the
-            ;; file is not safe to copy.
-            (when-let [strays (seq (sidecars db))]
+            ;; **After the pass, and after the checkpoint.** Nearly unreachable:
+            ;; every mode opens the database, which rolls back and deletes a
+            ;; journal, and a pass folds a WAL in and truncates it. What could
+            ;; still leave bytes here is something *else* writing while this ran —
+            ;; and, for a `-wal`, a reader holding the WAL open, which is what
+            ;; stops a TRUNCATE checkpoint completing. Either way the answer is the
+            ;; same: the file is not safe to copy.
+            (let [strays-after (sidecars db)]
+              (when (seq strays-after)
+                (println)
+                (println (str "  A " (str/join " and a " strays-after)
+                              " is still beside this database, with bytes in it."))
+                (println "  Do not copy or push the .db while that is true: the file alone is")
+                (println "  either torn or missing pages this database has. Re-run this pass in")
+                (println "  place — opening the database rolls a journal back and a pass folds a")
+                (println "  WAL in — and copy it only once this line is gone. A -wal that survives")
+                (println "  a checkpoint means something else is holding it open."))
               (println)
-              (println (str "  A " (str/join " and a " strays) " is still beside this database."))
-              (println "  Do not copy or push the .db while one is there: the file alone is either")
-              (println "  torn or silently different from what was committed. Re-run this pass in")
-              (println "  place — opening the database rolls the journal back — and copy it only")
-              (println "  once no journal remains beside it."))
-            (println)
-            ;; **Non-zero for anything left in a state the pass cannot call
-            ;; finished** — `unfinished`, above, which is where the list lives
-            ;; rather than spelled twice.
-            (System/exit (if (or (seq violations) (pos? unfinished)) 1 0)))))
+              ;; **Non-zero for anything left in a state the pass cannot call
+              ;; finished** — `unfinished`, above, which is where the list lives
+              ;; rather than spelled twice, plus whatever this run has left beside
+              ;; the file.
+              (System/exit (if (or (seq violations) (pos? (+ unfinished (count strays-after))))
+                             1 0))))))
       (catch Exception e
         (binding [*out* *err*] (println "tracker-seal-migrate:" (ex-message e)))
         (System/exit 2)))))
