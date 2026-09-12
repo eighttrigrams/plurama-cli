@@ -36,6 +36,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [cookbook-seal :as seal]
+            [tracker-seal]
             [org.httpkit.server :as srv]))
 
 (def ^:private port
@@ -193,28 +194,90 @@
 ;; the quiet half would have been a second copy of the envelope living in here,
 ;; and that is the one thing this project's reviews have caught twice.
 
-(def ^:private seal-key-path
+(defn- key-path
   "Mounted read-only into this container and nowhere else, like the credentials.
   Deliberately a file rather than an env var holding the key itself: env leaks
   through `docker inspect`, crash dumps and every child process, and the compose
-  file that would have to set it is synced to a git remote."
-  (or (System/getenv "PLURAMA_PROXY_SEAL_KEY") "/cookbook-seal.key"))
+  file that would have to set it is synced to a git remote.
 
-(def ^:private seal-key
-  "The key, or `nil` — and `nil` means sealing off, which is what every function
-  in `cookbook-seal` already understands and what this proxy did before.
+  `PLURAMA_PROXY_SEAL_KEY` keeps its cookbook-only name because that is what the
+  compose file and the README already say, and renaming a mount point to make a
+  second app fit is how a working sandbox stops starting."
+  [app]
+  (case app
+    :cookbook (or (System/getenv "PLURAMA_PROXY_SEAL_KEY") "/cookbook-seal.key")
+    :tracker  (or (System/getenv "PLURAMA_PROXY_TRACKER_SEAL_KEY") "/tracker-seal.key")))
+
+(defn- load-key
+  "The key, or `nil` — and `nil` means sealing off for that app, which is what
+  every function in the seal namespaces already understands and what this proxy
+  did before any of this existed.
 
   **A key that is there and malformed stops the process** rather than falling
   back to passthrough. The fallback would be the worst of both: agents writing
-  plaintext into a sealed shelf, and nothing anywhere saying so. `-main` forces
-  this before the server starts, so that failure happens at `docker compose up`
+  plaintext into a sealed store, and nothing anywhere saying so. `-main` forces
+  these before the server starts, so that failure happens at `docker compose up`
   and not on the first write."
-  (delay
-    (let [f (io/file seal-key-path)]
-      (when (.exists f)
-        (seal/key-from-base64 (slurp f))))))
+  [app from-base64]
+  (let [f (io/file (key-path app))]
+    ;; `.isFile`, not `.exists`. A bind mount whose source is missing creates an
+    ;; empty **directory** here rather than failing, and the compose file mounts
+    ;; a key per sealing app whether or not that app's ceremony has happened
+    ;; yet. Read as a malformed key, that directory stops the sidecar at
+    ;; `docker compose up` — which is what it did, crash-looping the whole box,
+    ;; the first time tracker's mount was added. A directory means no key, and
+    ;; no key means passthrough.
+    (when (.isFile f)
+      (from-base64 (slurp f)))))
 
-(defn- cookbook? [app] (= :cookbook app))
+(def ^:private cookbook-seal-key (delay (load-key :cookbook seal/key-from-base64)))
+(def ^:private tracker-seal-key (delay (load-key :tracker tracker-seal/key-from-base64)))
+
+(def ^:private sealers
+  "One adapter per app that seals prose. Two apps now, and the shape is what
+  keeps the handler from growing a branch per app: everything below takes a
+  `sealer` and asks it, rather than asking which app this is.
+
+  The key is a function of no arguments rather than the delay itself, so that
+  the delay stays a top-level var: the suite drives this whole path by redefining
+  those two, and a key reachable only through a map inside a `let` is a key no
+  test can supply.
+
+  The two differ in exactly three ways and the adapter is where all three live —
+  which inventory, which key, and that cookbook has a published-Recipe rule with
+  nothing to correspond to it in tracker. The envelope underneath is one file,
+  shared, and the fixtures are what say so.
+
+  `:tracker-just-msg` is the same tracker, reached with the mail-only identity,
+  and it is here for a reason that is easy to miss: **mail-only restricts what
+  that machine user may write, not what it may read.** An agent reading a task
+  through it would meet `enc:v1:…` with nothing to say why if this named only
+  `:tracker`."
+  (let [cookbook {:app :cookbook
+                  :key #(deref cookbook-seal-key)
+                  :key-path (key-path :cookbook)
+                  :sealed-columns seal/sealed-columns
+                  :write-target seal/write-target
+                  :prose-in seal/prose-in
+                  :state-path seal/state-path
+                  :state-of seal/state-of
+                  :seal-write seal/seal-write
+                  :unseal-response-body seal/unseal-response-body}
+        tracker {:app :tracker
+                 :key #(deref tracker-seal-key)
+                 :key-path (key-path :tracker)
+                 :sealed-columns tracker-seal/sealed-columns
+                 :write-target tracker-seal/write-target
+                 :prose-in tracker-seal/prose-in
+                 :state-path tracker-seal/state-path
+                 :state-of tracker-seal/state-of
+                 :seal-write tracker-seal/seal-write
+                 :unseal-response-body tracker-seal/unseal-response-body}]
+    {:cookbook cookbook
+     :tracker tracker
+     :tracker-just-msg tracker}))
+
+(defn- sealer-for [app] (get sealers app))
 
 (defn- json-body? [resp]
   (some-> (get-in resp [:headers "content-type"]) (str/includes? "json")))
@@ -233,12 +296,12 @@
   Anything that goes wrong answers `nil` for both, which means *nothing to echo*
   and a fresh seal — the safe direction for the echo rule, and the direction the
   server refuses if the published rule needed it."
-  [cfg token target]
-  (when-let [path (seal/state-path target)]
+  [sealer cfg token target]
+  (when-let [path ((:state-path sealer) target)]
     (try
       (let [resp (forward cfg token {:method :get :path path})]
         (when (= 200 (:status resp))
-          (seal/state-of target (json/parse-string (:body resp) true))))
+          ((:state-of sealer) target (json/parse-string (:body resp) true))))
       (catch Exception _ nil))))
 
 (defn- foreign-envelopes
@@ -263,8 +326,8 @@
   client that read a value this proxy could not open, and sent it back
   unchanged, is echoing rather than sealing, and `seal`'s own rule 2 answers that
   case correctly. Comparing against `stored` is what tells the two apart."
-  [table parsed stored]
-  (seq (for [column (get seal/sealed-columns table)
+  [sealer table parsed stored]
+  (seq (for [column (get (:sealed-columns sealer) table)
              :let [v (get parsed column)]
              :when (and (seal/sealed? v) (not= v (get stored column)))]
          column)))
@@ -287,15 +350,15 @@
   A body with no prose in it is the first of those and **asks the server
   nothing**: without that guard a filing PUT of `{\"tags\":\"x\"}` would drag down
   a whole version ladder to look up columns it is not sending."
-  [k cfg token {:keys [method path body]}]
-  (let [target (when (#{:post :put} method) (seal/write-target path))]
+  [sealer k cfg token {:keys [method path body]}]
+  (let [target (when (#{:post :put} method) ((:write-target sealer) path))]
     (when (and k target (seq body))
       (let [parsed (try (json/parse-string body true) (catch Exception _ nil))]
-        (when (seal/prose-in (:table target) parsed)
-          (let [{:keys [stored] :as state} (current-state cfg token target)]
-            (if-let [foreign (foreign-envelopes (:table target) parsed stored)]
+        (when ((:prose-in sealer) (:table target) parsed)
+          (let [{:keys [stored] :as state} (current-state sealer cfg token target)]
+            (if-let [foreign (foreign-envelopes sealer (:table target) parsed stored)]
               {:refused foreign}
-              (when-let [sealed (seal/seal-write k target parsed state)]
+              (when-let [sealed ((:seal-write sealer) k target parsed state)]
                 (when-not (= sealed parsed)
                   (let [moved (remove (fn [[c v]] (= v (get parsed c))) sealed)]
                     {:body (json/generate-string sealed)
@@ -326,11 +389,11 @@
   `cookbook-seal`'s rule 3 and every other client's behaviour: one unreadable
   column beside everything that reads, rather than a response dropped with
   nothing to say why."
-  [k resp]
+  [sealer k resp]
   (when (and k (json-body? resp) (seq (:body resp)))
     (try
       (let [parsed (json/parse-string (:body resp) true)
-            out (seal/unseal-response-body k parsed)]
+            out ((:unseal-response-body sealer) k parsed)]
         (when-not (= parsed out)
           {:body (json/generate-string out)}))
       (catch Exception _ nil))))
@@ -404,11 +467,12 @@
             login-auth? (and (nil? static-token) (some? (:username cfg)))]
         (try
           (let [token (or static-token (when login-auth? (token-for app cfg)))
-                ;; Cookbook only, and only after the token exists: sealing a write
-                ;; needs one read of the row it is aimed at, and that read is
-                ;; authenticated like any other.
-                k (when (cookbook? app) @seal-key)
-                out (when k (seal-outgoing k cfg token req))]
+                ;; Only for an app that seals, and only after the token exists:
+                ;; sealing a write needs one read of the row it is aimed at, and
+                ;; that read is authenticated like any other.
+                sealer (sealer-for app)
+                k (when sealer ((:key sealer)))
+                out (when k (seal-outgoing sealer k cfg token req))]
             (if-let [refused (:refused out)]
               ;; **The one refusal this proxy makes that is not about reach.** See
               ;; `foreign-envelopes`: the key belongs on one side of this hop or
@@ -418,7 +482,7 @@
               (do (log! "DENY" request-method uri "- prose already sealed:"
                         (str/join "," (map name refused)))
                   (json-response 400
-                                 {:error (str "this proxy seals cookbook prose, and "
+                                 {:error (str "this proxy seals " (name app) " prose, and "
                                               (str/join ", " (map name refused))
                                               " arrived already sealed. The key belongs on one "
                                               "side of the proxy or the other, never both — "
@@ -434,7 +498,7 @@
                              ;; caller's answer.
                              (forward cfg (login! app cfg) req)
                              r))
-                    opened (when k (unseal-incoming k resp))]
+                    opened (when k (unseal-incoming sealer k resp))]
                 ;; The audit line says whether prose crossed sealed, and whether
                 ;; anything was echoed rather than freshly sealed, because "did the
                 ;; key work" and "did the echo rule fire" are otherwise questions
@@ -460,13 +524,24 @@
         ;; somebody is watching, rather than on the first write months later —
         ;; and it must stop it before a line saying *listening* scrolls past.
         ;; "Sealing on" means the key opens things, not that a file exists.
-        k (when (:cookbook @credentials)
-            (try @seal-key
-                 (catch Exception e
-                   (binding [*out* *err*]
-                     (println "plurama-cli-proxy: cookbook seal key at" seal-key-path
-                              "is unusable --" (ex-message e)))
-                   (System/exit 1))))]
+        ;;
+        ;; Both apps, and only the ones this proxy is actually configured to
+        ;; reach: a box given cookbook and not tracker has no business failing
+        ;; to start over a tracker key it will never use.
+        configured (->> sealers
+                        (keep (fn [[app sealer]] (when (get @credentials app) sealer)))
+                        (distinct)
+                        (vec))
+        keys-by-app (into {}
+                          (for [sealer configured]
+                            [(:app sealer)
+                             (try ((:key sealer))
+                                  (catch Exception e
+                                    (binding [*out* *err*]
+                                      (println "plurama-cli-proxy:" (name (:app sealer))
+                                               "seal key at" (:key-path sealer)
+                                               "is unusable --" (ex-message e)))
+                                    (System/exit 1)))]))]
     (log! "plurama-cli-proxy listening on" port)
     (log! "targets:" (str/join ", " apps))
     (doseq [app apps
@@ -479,11 +554,13 @@
     ;; that *this holds the same key the owner's browser does* is a comparison
     ;; anyone can make in five seconds. It is a name for a key and no help in
     ;; finding one; the key itself is never printed, logged or answered with.
-    (when (:cookbook @credentials)
+    (doseq [sealer configured
+            :let [k (get keys-by-app (:app sealer))]]
       (if k
-        (log! " cookbook prose: sealed here, key" seal-key-path
+        (log! " " (str (name (:app sealer)) " prose:") "sealed here, key" (:key-path sealer)
               "fingerprint" (seal/fingerprint k))
-        (log! " cookbook prose: passthrough -- no key at" seal-key-path)))
+        (log! " " (str (name (:app sealer)) " prose:") "passthrough -- no key at"
+              (:key-path sealer))))
     (srv/run-server handle {:port port :ip "0.0.0.0"})
     @(promise)))
 

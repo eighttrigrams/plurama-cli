@@ -17,6 +17,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [cookbook-seal :as seal]
+            [tracker-seal]
             [org.httpkit.server :as srv]
             [plurama-cli-proxy]))
 
@@ -45,16 +46,23 @@
          (finally (stop)))))
 
 (defn- request
-  "One box-side request through the proxy, with the key it is to hold."
+  "One box-side request through the proxy, with the keys it is to hold.
+
+  `k` is cookbook's, for the tests that predate tracker sealing. A map instead
+  names both, which is what a tracker test needs — and what proves the two keys
+  are genuinely separate rather than one key the proxy happens to use twice."
   [{:keys [port]} k {:keys [method uri body]}]
-  (with-redefs [plurama-cli-proxy/credentials
+  (let [{ck :cookbook tk :tracker} (if (map? k) k {:cookbook k})]
+   (with-redefs [plurama-cli-proxy/credentials
                 (delay {:cookbook {:base-url (str "http://127.0.0.1:" port)}
+                        :tracker {:base-url (str "http://127.0.0.1:" port)}
                         :tracker-just-msg {:base-url (str "http://127.0.0.1:" port)}})
-                plurama-cli-proxy/seal-key (delay k)]
+                plurama-cli-proxy/cookbook-seal-key (delay ck)
+                plurama-cli-proxy/tracker-seal-key (delay tk)]
     (handle {:request-method method
              :uri uri
              :body (when body (java.io.StringReader. body))
-             :headers {"content-type" "application/json"}})))
+             :headers {"content-type" "application/json"}}))))
 
 (defn- body-of [resp] (json/parse-string (:body resp) true))
 
@@ -308,3 +316,137 @@
             (is (not (str/includes? logged "a new sentence, also private")))
             (is (not (str/includes? logged key-b64)))
             (is (not (str/includes? logged "enc:v1:")))))))))
+
+;; ---------------------------------------------------------------------------
+;; Tracker, the second app to seal — and the reason this proxy stopped being
+;; cookbook-shaped.
+;;
+;; The whole of what is new here is that there are now two keys and they are
+;; different secrets. A test that used one key for both would pass while proving
+;; the opposite of what matters.
+
+(def ^:private tracker-test-key
+  (delay (tracker-seal/key-from-base64 (tracker-seal/generate-key-base64))))
+
+(defn- tracker-keys []
+  {:cookbook @test-key :tracker @tracker-test-key})
+
+(deftest a-tracker-write-is-sealed-on-the-way-past
+  (with-upstream {"/api/tasks/7" {:body {:id 7 :title "a task" :description ""}}}
+    (fn [up]
+      (let [resp (request up (tracker-keys)
+                          {:method :put :uri "/tracker/api/tasks/7"
+                           :body (json/generate-string {:title "a task"
+                                                        :description "what the agent wrote"})})
+            forwarded (->> @(:seen up)
+                           (filter #(= :put (:method %)))
+                           first
+                           :body
+                           (#(json/parse-string % true)))]
+        (is (= 200 (:status resp)))
+        (is (tracker-seal/sealed? (:description forwarded))
+            "the upstream is handed an envelope, never the prose")
+        (is (= "a task" (:title forwarded)) "and the title goes as it was typed")
+        (is (= "what the agent wrote"
+               (tracker-seal/unseal @tracker-test-key :tasks :description (:description forwarded))))))))
+
+(deftest the-two-keys-are-not-one-key
+  (with-upstream {"/api/tasks/7" {:body {:id 7 :description ""}}}
+    (fn [up]
+      (request up (tracker-keys)
+               {:method :put :uri "/tracker/api/tasks/7"
+                :body (json/generate-string {:description "a body"})})
+      (let [forwarded (-> (->> @(:seen up) (filter #(= :put (:method %))) first :body)
+                          (json/parse-string true))]
+        (is (= (:description forwarded)
+               (seal/unseal @test-key :recipes :description (:description forwarded)))
+            "cookbook's key does not open a tracker body — handed back, not opened")
+        (is (= "a body" (tracker-seal/unseal @tracker-test-key :tasks :description
+                                             (:description forwarded))))))))
+
+(deftest a-tracker-response-is-opened-on-the-way-back
+  (let [ct (tracker-seal/seal @tracker-test-key :tasks :description "a sealed body" nil)]
+    (with-upstream {"/api/tasks/7" {:body {:id 7 :title "a task" :description ct}}}
+      (fn [up]
+        (let [resp (request up (tracker-keys) {:method :get :uri "/tracker/api/tasks/7"})]
+          (is (= "a sealed body" (:description (body-of resp)))
+              "an agent in the box reads prose, and the box holds no key"))))))
+
+(deftest a-tracker-response-opens-wherever-the-prose-is
+  (let [ct #(tracker-seal/seal @tracker-test-key :tasks :description % nil)]
+    (with-upstream {"/api/today-board"
+                    {:body {:tasks [{:id 1 :description (ct "a task body")
+                                     :categories [{:id 9 :description (ct "a person")}]}]
+                            :meets [{:id 2 :description (ct "a meeting note")}]}}}
+      (fn [up]
+        (let [b (body-of (request up (tracker-keys) {:method :get :uri "/tracker/api/today-board"}))]
+          (is (= "a task body" (get-in b [:tasks 0 :description])))
+          (is (= "a person" (get-in b [:tasks 0 :categories 0 :description]))
+              "a category nested in a task, found without anyone remembering it is there")
+          (is (= "a meeting note" (get-in b [:meets 0 :description]))))))))
+
+(deftest an-unchanged-tracker-body-echoes-rather-than-re-sealing
+  (let [ct (tracker-seal/seal @tracker-test-key :tasks :description "unchanged" nil)]
+    (with-upstream {"/api/tasks/7" {:body {:id 7 :description ct}}}
+      (fn [up]
+        (request up (tracker-keys)
+                 {:method :put :uri "/tracker/api/tasks/7"
+                  :body (json/generate-string {:description "unchanged"})})
+        (let [forwarded (-> (->> @(:seen up) (filter #(= :put (:method %))) first :body)
+                            (json/parse-string true))]
+          (is (= ct (:description forwarded))
+              "the very bytes already stored, so the audit log records no edit"))))))
+
+(deftest a-tracker-write-arriving-already-sealed-is-refused
+  (let [foreign (tracker-seal/seal @tracker-test-key :tasks :description "sealed in the box" nil)]
+    (with-upstream {"/api/tasks/7" {:body {:id 7 :description ""}}}
+      (fn [up]
+        (let [resp (request up (tracker-keys)
+                            {:method :put :uri "/tracker/api/tasks/7"
+                             :body (json/generate-string {:description foreign})})]
+          (is (= 400 (:status resp)))
+          (is (= "already-sealed" (:reason (body-of resp))))
+          (is (= ["description"] (:columns (body-of resp))))
+          (is (empty? (filter #(= :put (:method %)) @(:seen up)))
+              "and nothing was forwarded: the key belongs on one side of this hop")
+          (is (not (str/includes? (:body resp) "sealed in the box"))
+              "the refusal names the column and never the value"))))))
+
+(deftest a-message-body-goes-through-the-proxy-untouched
+  (with-upstream {"/api/messages" {:body {:id 5}}}
+    (fn [up]
+      (request up (tracker-keys)
+               {:method :post :uri "/tracker-just-msg/api/messages"
+                :body (json/generate-string {:sender "blog" :title "m"
+                                             :description "an inbox body"})})
+      (let [forwarded (-> (->> @(:seen up) (filter #(= :post (:method %))) first :body)
+                          (json/parse-string true))]
+        (is (= "an inbox body" (:description forwarded))
+            "three keyless producers write these; sealing them would break the inbox")))))
+
+(deftest tracker-just-msg-still-opens-what-it-reads
+  ;; Mail-only restricts what that identity may **write**, not what it may read.
+  (let [ct (tracker-seal/seal @tracker-test-key :tasks :description "a body" nil)]
+    (with-upstream {"/api/tasks/7" {:body {:id 7 :description ct}}}
+      (fn [up]
+        (is (= "a body"
+               (:description (body-of (request up (tracker-keys)
+                                               {:method :get :uri "/tracker-just-msg/api/tasks/7"})))))))))
+
+(deftest with-no-tracker-key-everything-passes-through
+  (let [ct (tracker-seal/seal @tracker-test-key :tasks :description "still sealed" nil)]
+    (with-upstream {"/api/tasks/7" {:body {:id 7 :description ct}}}
+      (fn [up]
+        (let [resp (request up {:cookbook @test-key :tracker nil}
+                            {:method :get :uri "/tracker/api/tasks/7"})]
+          (is (= ct (:description (body-of resp)))
+              "passthrough, byte for byte — the proxy before any of this existed"))))))
+
+(deftest a-tracker-write-with-no-prose-asks-the-upstream-nothing
+  (with-upstream {"/api/tasks/7" {:body {:id 7}}}
+    (fn [up]
+      (request up (tracker-keys)
+               {:method :put :uri "/tracker/api/tasks/7"
+                :body (json/generate-string {:tags "x"})})
+      (is (= 1 (count @(:seen up)))
+          "one PUT and no read: the echo rule is only paid for when there is prose"))))
