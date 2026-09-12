@@ -1,17 +1,21 @@
 ;; Two things live here, and neither of them is a build.
 ;;
-;; `:paths` is what makes `cookbook_seal.clj` requirable from a checkout, so that
-;; the envelope is one file rather than one copy inside `plurama_cli.clj` and a
-;; second inside `cookbook_tui.clj`. Outside a checkout there is no classpath to
+;; `:paths` is what makes `seal_envelope.clj` and the two app seal namespaces
+;; requirable from a checkout, so that the envelope is one file rather than one
+;; copy per script — and, since tracker joined cookbook in sealing prose, one
+;; file rather than one copy per app. Outside a checkout there is no classpath to
 ;; put it on, and babashka says so loudly rather than quietly: an installed lone
 ;; file refuses to start. That is what the `Makefile` beside this is for —
 ;; `make dist` collects the namespaces into one self-contained script, the same
 ;; target `us-vs-them` has, and the private deploy script bakes credentials into
 ;; what it produces rather than into a source file.
 ;;
-;; `test` is the drift control. It reads the shared vector file out of the
-;; cookbook checkout beside this one — the same sibling-checkout idiom cookbook's
-;; own deps.edn uses for us-vs-them — and refuses to pass without it.
+;; `test` is the drift control, and there are two fixtures now: one in the
+;; cookbook checkout beside this one and one in the tracker checkout, each naming
+;; its own app's columns and its own throwaway key. Both are reached by the
+;; sibling-checkout idiom cookbook's own deps.edn uses for us-vs-them, and the
+;; suites refuse to pass without them. They share `seal_envelope.clj`, so an edit
+;; to the cipher that satisfies one app and not the other cannot get through.
 ;;
 ;; The third suite needs `sqlite3` on PATH rather than a checkout: the migration
 ;; walker talks to a database file, so what is worth holding still about it is
@@ -21,12 +25,20 @@
 ;; The fourth needs neither. It drives the proxy sidecar's own `handle` against a
 ;; cookbook it starts on a loopback port — the whole path a box's request takes,
 ;; short of the compose mount.
-{:paths ["." "test"]
+;; `../tracker/src/cljc` is on the path because tracker's pure seal rules — the
+;; prefix, the binding, the inventory, and where prose hides inside an audit
+;; payload — are a `.cljc` file its server and its browser already read. This
+;; repo is the third reader. Reaching a sibling checkout is the idiom the fixture
+;; already uses, and the direction matters: the rules live in the app whose
+;; schema they describe, because the umbrella's Docker build copies `tracker/`
+;; and does not copy this repo.
+{:paths ["." "test" "../tracker/src/cljc"]
  :tasks {test {:doc "Run the seal suites: the shared test vectors, the pure decisions the seal added to plurama_cli, and the migration walker against a database it builds."
                :requires ([clojure.test :as t])
-               :task (do (require 'cookbook-seal-test 'plurama-cli-test 'cookbook-seal-migrate-test
-                                  'plurama-cli-proxy-test)
+               :task (do (require 'cookbook-seal-test 'tracker-seal-test 'plurama-cli-test
+                                  'cookbook-seal-migrate-test 'plurama-cli-proxy-test)
                          (let [{:keys [fail error]} (t/run-tests 'cookbook-seal-test
+                                                                 'tracker-seal-test
                                                                  'plurama-cli-test
                                                                  'cookbook-seal-migrate-test
                                                                  'plurama-cli-proxy-test)]
