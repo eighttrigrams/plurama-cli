@@ -1015,17 +1015,80 @@
              id (foreign-sealed-ids db ids table)]
          {:table table :id id :column (first (value-columns table)) :why :foreign-sealed})))
 
+(defn- parse!
+  "The command line, refused rather than interpreted. `{:opts … :db …}`.
+
+  ## Why this is a function and not a call to `parse-args`
+
+  `babashka.cli` is permissive by default: an option it does not recognise is
+  parsed into the map under its own misspelled key and nothing anywhere says so.
+  Every **mode** here is an option, so an unrecognised one selects no mode — and
+  the mode that nothing selects is the bare pass, which is the one thing in this
+  program that cannot be undone without the key and a second downtime.
+
+  That inverted the whole character of the program. A missing `--user` is
+  refused, a machine user's name is refused, a missing key is refused, two modes
+  at once is refused, `--arm --unseal` is refused: **every deliberate mistake was
+  caught, and only a typo got through — into the irreversible one.** `--dryrun`,
+  `--dry_run`, `-n` and `--verfiy` each sealed a whole database at the step whose
+  entire purpose is to decide everything and write nothing.
+
+  So: three refusals, and each of them is the same rule said about a different
+  way of being unrecognised.
+
+  1. **An option this program does not have.** `:restrict` is `babashka.cli`'s
+     own word for that, and it resolves aliases first, so `-h` still means
+     `--help`.
+  2. **A mode given a value that reads as false.** `:restrict` does not catch
+     this one, and it is the same fall-through by another spelling: `--verify
+     false`, `--verify=false` and `--no-verify` all parse cleanly, all leave the
+     mode unselected, and all run the pass. Every flag here is a switch — it is
+     given or it is not — so a `false` in one is a typing that did not mean what
+     it said, and guessing which half of it was meant is not this program's
+     business.
+  3. **A second database.** One was operated on and the rest dropped in silence,
+     which looks exactly like a run that did all of them.
+
+  Nothing here loads a key or opens a file, and that is deliberate: an argument
+  is wrong before either of those is anybody's business."
+  [argv]
+  (let [{:keys [opts args]}
+        (try (cli/parse-args argv {:spec cli-spec :aliases {:h :help} :restrict true})
+             (catch Exception e
+               (if-not (= :restrict (:cause (ex-data e)))
+                 (throw e)
+                 (throw (ex-info (str (ex-message e) ". The flags this program has are "
+                                      (str/join ", " (map #(str "--" (name %)) (keys cli-spec)))
+                                      ". One it does not know selects no mode, and the mode"
+                                      " nothing selects is the pass — which writes, and is not"
+                                      " reversible without the key and a second downtime.")
+                                 {})))))
+        negated (sort (keep (fn [[k v]] (when (false? v) (name k))) opts))]
+    (when (seq negated)
+      (throw (ex-info (str (str/join " and " (map #(str "--" %) negated))
+                           " read as false. Every flag here is a switch: it is given or it is"
+                           " not, and there is no third answer to act on. One that parses to"
+                           " false selects no mode, and the mode nothing selects is the pass"
+                           " — which writes.")
+                      {})))
+    (when (next args)
+      (throw (ex-info (str "one database at a time, and this names " (count args) ": "
+                           (str/join ", " args) ". Only the first would have been walked and"
+                           " the rest dropped in silence, which reads exactly like a run that"
+                           " had done all of them.")
+                      {})))
+    {:opts opts :db (first args)}))
+
 (defn -main [& args]
-  (let [{:keys [opts args]} (cli/parse-args args {:spec cli-spec :aliases {:h :help}})
-        db (first args)
-        direction (if (or (:unseal opts) (:inverse opts)) :unseal :seal)
-        chosen (filterv some? [(when (:arm opts) :arm) (when (:disarm opts) :disarm)
-                               (when (:verify opts) :verify) (when (:dry-run opts) :dry-run)])
-        mode (or (first chosen) :pass)]
-    (when (or (:help opts) (nil? db))
-      (usage)
-      (System/exit (if (:help opts) 0 2)))
-    (try
+  (try
+    (let [{:keys [opts db]} (parse! args)
+          direction (if (or (:unseal opts) (:inverse opts)) :unseal :seal)
+          chosen (filterv some? [(when (:arm opts) :arm) (when (:disarm opts) :disarm)
+                                 (when (:verify opts) :verify) (when (:dry-run opts) :dry-run)])
+          mode (or (first chosen) :pass)]
+      (when (or (:help opts) (nil? db))
+        (usage)
+        (System/exit (if (:help opts) 0 2)))
       (when (next chosen)
         (throw (ex-info (str "these are different jobs and only one of them can be this run: "
                              (str/join ", " (map name chosen))) {})))
@@ -1210,10 +1273,10 @@
               ;; rather than spelled twice, plus whatever this run has left beside
               ;; the file.
               (System/exit (if (or (seq violations) (pos? (+ unfinished (count strays-after))))
-                             1 0))))))
-      (catch Exception e
-        (binding [*out* *err*] (println "tracker-seal-migrate:" (ex-message e)))
-        (System/exit 2)))))
+                             1 0)))))))
+    (catch Exception e
+      (binding [*out* *err*] (println "tracker-seal-migrate:" (ex-message e)))
+      (System/exit 2))))
 
 (when (= *file* (System/getProperty "babashka.file"))
   (apply -main *command-line-args*))

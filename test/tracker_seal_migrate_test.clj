@@ -701,6 +701,56 @@
       (is (= 0 (:exit (run-script "--user" "daniel" db)))
           "and the next run, over the repaired file, is the one to trust"))))
 
+(deftest a-flag-this-does-not-know-is-a-refusal-and-never-a-pass
+  (testing "**Every deliberate mistake here is already caught and only a typo got
+    through — into the one mode that cannot be undone.** A missing `--user`, a
+    machine user's name, a missing key, two modes at once and `--arm --unseal` are
+    all refusals. But an option this program does not know was parsed, kept under
+    its misspelled key, and selected no mode at all — so the run fell through to
+    the bare pass, which writes. `--dryrun` sealed the database it was asked to
+    leave alone.
+
+    So an unknown option is a refusal, before the key is loaded and before the
+    database is opened."
+    (doseq [flag ["--dryrun" "--dry_run" "-n" "--verfiy" "--unsel" "--am" "--Verify"]]
+      (let [db (clean-db)
+            {:keys [exit err]} (run-script flag "--user" "daniel" db)]
+        (is (= 2 exit) (str flag " is not a flag this program has"))
+        (is (str/includes? err flag) (str "and the refusal names " flag))
+        (is (= "a body" (value db :tasks :description "id=1"))
+            (str flag " wrote nothing")))))
+
+  (testing "**a mode given a value that reads as false selects no mode**, which is
+    the same fall-through by another spelling: `--verify false` and `--no-verify`
+    both parse, both leave `chosen` empty, and both would run the pass. Every mode
+    here is a switch — it is given or it is not."
+    (doseq [args [["--verify" "false"] ["--verify=false"] ["--no-verify"]
+                  ["--dry-run" "false"] ["--no-dry-run"] ["--no-unseal"]]]
+      (let [db (clean-db)
+            {:keys [exit err]} (apply run-script (concat args ["--user" "daniel" db]))]
+        (is (= 2 exit) (str (pr-str args) " is a mode that was not asked for"))
+        (is (str/includes? err "switch") (str "and says why: " (pr-str args)))
+        (is (= "a body" (value db :tasks :description "id=1"))
+            (str (pr-str args) " wrote nothing")))))
+
+  (testing "**a second database on the command line is a refusal too.** It was
+    dropped in silence, so `--user daniel A.db B.db` sealed `A.db`, said nothing
+    about `B.db`, and looked exactly like a run that had done both."
+    (let [a (clean-db)
+          b (clean-db)
+          {:keys [exit err]} (run-script "--user" "daniel" a b)]
+      (is (= 2 exit))
+      (is (str/includes? err b) "the refusal names the one it would have ignored")
+      (is (= "a body" (value a :tasks :description "id=1")) "and neither was written")
+      (is (= "a body" (value b :tasks :description "id=1")))))
+
+  (testing "and the flags it does have still work, which is what makes the above a
+    fix rather than a wall"
+    (let [db (clean-db)]
+      (is (= 0 (:exit (run-script "--dry-run" "--user" "daniel" db))))
+      (is (= 0 (:exit (run-script "-h"))) "including the alias")
+      (is (= "a body" (value db :tasks :description "id=1"))))))
+
 (deftest arming-is-the-last-act-and-refuses-to-be-anything-else
   (testing "`users.seal_prose` is what makes the server refuse a write that would
     introduce new plaintext prose into this user's rows. **Armed over an
