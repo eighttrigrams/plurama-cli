@@ -201,7 +201,11 @@
     ;; 9, 10 — not his. One belongs to antonio and one to nobody at all, and the
     ;; walk must not read, count or touch either.
     (insert! db :tasks {:id 9 :user_id antonio :title "antonio's" :description "antonio's body"})
-    (insert! db :tasks {:id 10 :user_id nil :title "ownerless" :description "a body with no owner"})
+    ;; Not "a body with no owner": `no owner` is the program's own reason for an
+    ;; orphan carrying the prefix, so asserting that phrase present could have been
+    ;; satisfied by this body leaking instead.
+    (insert! db :tasks {:id 10 :user_id nil :title "ownerless"
+                        :description "a body 🦫 on a row with no user_id"})
     ;; 11 — a machine user's row. In scope: a machine acting for him is him.
     (insert! db :tasks {:id 11 :user_id machine :title "the machine's" :description "written by a machine"})
 
@@ -264,7 +268,13 @@
   is the control every exit-code assertion below is measured against."
   []
   (let [db (with-users! (tmp-db "tracker-seal-walk-clean"))]
-    (insert! db :tasks {:id 1 :user_id daniel :title "one" :description "a body"})
+;; **The bodies here are sentinels and carry a character this program never
+    ;; prints.** `a body` was not one: it is a substring of the `clear-tables`
+    ;; note (*the one search in tracker that reads a body*), so the verbose test's
+    ;; *never a value* assertion could have gone red over a line that leaked
+    ;; nothing. A fixture value that collides with the output it is asserted
+    ;; against cannot fail — or pass — for its own reason.
+    (insert! db :tasks {:id 1 :user_id daniel :title "one" :description "a body 🦫"})
     (insert! db :tasks {:id 2 :user_id daniel :title "two" :description "another body"})
     (insert! db :tasks {:id 3 :user_id antonio :title "antonio's" :description "not his to seal"})
     (insert! db :events {:id 1 :effective_user_id daniel :action "create" :entity_type "task"
@@ -369,7 +379,7 @@
       antonio's rows, and a row with no owner at all, are byte for byte what they
       were — in every table, and in the audit log."
       (is (= "antonio's body" (value db :tasks :description "id=9")))
-      (is (= "a body with no owner" (value db :tasks :description "id=10")))
+      (is (= "a body 🦫 on a row with no user_id" (value db :tasks :description "id=10")))
       (doseq [table (remove #{:tasks} tables)]
         (is (= (str "antonio's " (name table)) (value db table :description "id=2")) (name table)))
       (is (= "antonio's event prose" (get-in (event-payload db 9) [:row :description]))))
@@ -670,7 +680,7 @@
         (let [{:keys [out]} (run-script "--dry-run" "--verbose" "--user" "daniel" db)]
           (is (str/includes? out "tasks            id 1       description"))
           (is (str/includes? out "events           id 1       payload"))
-          (is (not (str/includes? out "a body")) "never a value")
+          (is (not (str/includes? out "a body 🦫")) "never a value")
           (is (not (str/includes? out "a created body")))))
       (testing "and the alarms the playbook's checklist names are printed whether
         or not they are zero — the table above them prints only the buckets that
@@ -681,7 +691,7 @@
                                       " · unwalked 0 · moved 0")))
           (is (str/includes? out "sealed rows of other users 0"))))
       (is (= 0 (:exit (run-script "--dry-run" "--user" "daniel" db))))
-      (is (= "a body" (value db :tasks :description "id=1")) "a dry run writes nothing")
+      (is (= "a body 🦫" (value db :tasks :description "id=1")) "a dry run writes nothing")
       (is (= 0 (:exit (run-script "--user" "daniel" db))))
       (is (= 0 (:exit (run-script "--verify" "--user" "daniel" db))))
       (is (= 0 (:exit (run-script "--user" "daniel" db))) "and again, idempotently")
@@ -702,7 +712,7 @@
       (is (str/includes? err "daniel (id 4)"))
       (is (= 2 (:exit (run-script "--user" "nobody" db))))
       (is (= 2 (:exit (run-script "--user" "daniel-machine" db))))
-      (is (= "a body" (value db :tasks :description "id=1")) "and nothing was written")))
+      (is (= "a body 🦫" (value db :tasks :description "id=1")) "and nothing was written")))
 
   (testing "**it refuses to run without a usable key**, unlike every other client
     here, because *no key* would mean a pass that walks the whole database, writes
@@ -722,7 +732,7 @@
         (let [{:keys [exit err]} (run-env {"TRACKER_SEAL_KEY" ""} "--user" "daniel" db)]
           (is (= 2 exit))
           (is (str/includes? err "no key"))))
-      (is (= "a body" (value db :tasks :description "id=1")) "and nothing was written")))
+      (is (= "a body 🦫" (value db :tasks :description "id=1")) "and nothing was written")))
 
   (testing "**a nested envelope is a violation, in a pass and in a verify.** No
     correct client writes one; one that sealed a ciphertext it had echoed did, and
@@ -884,8 +894,21 @@
           (is (str/includes? out "unopenable 1"))
           (is (str/includes? out "sealed under another key")
               "the explanation, which is the program's and cannot be the body")
-          (is (not (str/includes? out body)) "and the body itself is never printed")
-          (is (not (str/includes? out "NOT-ENVELOPE"))))))
+          (is (not (str/includes? out "NOT-ENVELOPE"))))
+        ;; **And the leak assertion belongs here, not above.** Two goes at it were
+        ;; wrong in the way `:4351` warns about — an assertion that reads well and
+        ;; cannot fail. The plaintext is the wrong thing to look for: this key
+        ;; does not open the row, so the walker never holds the body and could not
+        ;; print it however broken it got. And a pass is the wrong mode to look
+        ;; in: it reports `unopenable` in a closing note that names no rows at
+        ;; all. `--verify` is where a row and its value are in the same hand, in
+        ;; `print-violations`, so the envelope is what could escape and this is
+        ;; where it would. Mutating a value into that line turns this red, and
+        ;; turned neither of the other two.
+        (let [{:keys [out]} (run-script "--verify" "--user" "daniel" db)]
+          (is (str/includes? out "id 91") "the row is named")
+          (is (not (str/includes? out (value db :tasks :description "id=91")))
+              "and its envelope is not: ids and reasons only, never a value"))))
 
     (testing "the question itself, which is about shape and never about a key: what
       follows the prefix has to be base64, and has to decode to at least a nonce
@@ -1044,14 +1067,15 @@
       (let [{:keys [exit out]} (run-script "--verify" "--user" "daniel" db)]
         (is (= 1 exit))
         (is (str/includes? out "id 10"))
-        (is (str/includes? out "no owner"))
+        (is (str/includes? out "a row with no owner at all")
+            "the program's whole phrase, which no fixture body can stand in for")
         (is (not (str/includes? out "an orphan, sealed")) "and never the value"))
       (testing "while another user's sealed row still reads as another user's"
         (sqlite! db (str "UPDATE tasks SET description = "
                          (@#'walk/literal (sealed "antonio's, sealed")) " WHERE id = 9;"))
         (let [{:keys [out]} (run-script "--verify" "--user" "daniel" db)]
           (is (str/includes? out "another user's row"))
-          (is (str/includes? out "no owner"))))))
+          (is (str/includes? out "a row with no owner at all"))))))
 
   (testing "the counts themselves, out of `foreign-audit` rather than off the
     screen — one ownerless task in the fixture, and nothing sealed anywhere"
@@ -1260,7 +1284,7 @@
     (let [db (clean-db)]
       (is (= 0 (:exit (run-script "--dry-run" "--user" "daniel" db))))
       (is (= 0 (:exit (run-script "-h"))) "including the alias")
-      (is (= "a body" (value db :tasks :description "id=1"))))))
+      (is (= "a body 🦫" (value db :tasks :description "id=1"))))))
 
 (deftest the-tables-that-must-stay-clear-are-asked-about-too
   (testing "**the second direction was *nothing of anybody else's is sealed*, and
@@ -1457,7 +1481,7 @@
         (is (= 0 (:exit (run-script "--disarm" "--user" "daniel" db))))
         (is (= 0 (:exit (run-script "--unseal" "--user" "daniel" db))))
         (is (= 0 (:exit (run-script "--verify" "--inverse" "--user" "daniel" db))))
-        (is (= "a body" (value db :tasks :description "id=1"))))))
+        (is (= "a body 🦫" (value db :tasks :description "id=1"))))))
 
   (testing "the flag is in the header of every run, in every mode, because it is
     half of what the state of a cutover is and reading it should not cost a second
