@@ -881,6 +881,68 @@
           (is (= note (get-in (event-payload db 90) [:row :description]))
               "untouched, like every other value this pass cannot account for"))))))
 
+(deftest the-smoke-alarm-counts-only-the-descriptions-it-could-have-matched
+  (testing "**one blank walked description used to cancel one unknown one.**
+    `loose-description` matches a `\"description\"` key with a *non-empty* value;
+    the count it was compared against was every path `prose-paths` found, blank
+    ones included. So a payload holding one blank body in a shape that is walked
+    and one real body in a shape that is not came out even, and the alarm whose
+    whole job is to say *there is prose here nobody walks* stayed quiet.
+
+    It needs a sixth shape and a blank in the same payload, so it is contingent —
+    but blanks are 1,634 of the 5,293 payload values on the dev file, so roughly a
+    third of any such payload would have slipped."
+    (let [db (clean-db)]
+      (insert! db :events {:id 90 :effective_user_id daniel :action "create"
+                           :payload (payload {:row {:description ""}
+                                              :extra {:description "prose nobody walks"}})})
+      (let [counts (pass db :pass :seal)]
+        (is (= 1 (get counts :unwalked)) "the miss, and it is the whole finding"))
+      (is (= "prose nobody walks" (get-in (event-payload db 90) [:extra :description]))
+          "still in the clear, which is what the alarm is for")
+      (is (= 1 (:exit (run-script "--verify" "--user" "daniel" db))))))
+
+  (testing "the rest of the review's table, which is what says the fix did not
+    simply turn the alarm on for everything"
+    (doseq [[shape alarms? why]
+            [[{:row {:description ""} :extra {:description "prose nobody walks"}}
+              1 "a blank walked body no longer cancels an unwalked one"]
+             [{:row {:description "walked"} :extra {:description "prose nobody walks"}}
+              1 "and the case that always worked still does"]
+             [{:snapshot {:description "walked" :categories [{:description "cat prose"}]}}
+              1 "prose one level further down than any shape looks"]
+             [{:sixth {:description "prose nobody walks"}}
+              1 "a shape with nothing walked in it at all"]
+             [{:row {:description ""} :extra {:description ""}}
+              nil "two blanks are not prose, and must not cry wolf"]
+             [{:row {:description "walked"}} nil "the ordinary create"]
+             [{:snapshot {:description ""}} nil "the ordinary blank create"]]]
+      (let [db (clean-db)]
+        (insert! db :events {:id 90 :effective_user_id daniel :action "x" :payload (payload shape)})
+        (is (= alarms? (get (pass db :pass :seal) :unwalked)) why))))
+
+  (testing "and the three shapes that hold no literal `\"description\":\"…\"` still
+    cannot make it fire, which is the property the comparison exists to keep: an
+    update names the field, a multi-field change nests it, and a dropped write's
+    body is escaped inside a string"
+    (doseq [shape [{:field "description" :old-value "what it was" :new-value "what it is"}
+                   {:changes {:description {:old "before" :new "after"}}}
+                   {:method "PUT" :uri "/api/tasks/1"
+                    :body "{\"description\":\"a body inside a raw request\"}"}]]
+      (let [db (clean-db)]
+        (insert! db :events {:id 90 :effective_user_id daniel :action "x" :payload (payload shape)})
+        (is (nil? (get (pass db :pass :seal) :unwalked)) (pr-str shape)))))
+
+  (testing "an update whose old value is blank and whose new one is not — one
+    blank and one body in one row, which is the commonest payload in the log —
+    still does not fire, because neither of its paths could have matched the
+    regex in the first place"
+    (let [db (clean-db)]
+      (insert! db :events {:id 90 :effective_user_id daniel :action "update"
+                           :payload (payload {:field "description" :old-value ""
+                                              :new-value "the first body"})})
+      (is (nil? (get (pass db :pass :seal) :unwalked))))))
+
 (deftest a-flag-this-does-not-know-is-a-refusal-and-never-a-pass
   (testing "**Every deliberate mistake here is already caught and only a typo got
     through — into the one mode that cannot be undone.** A missing `--user`, a

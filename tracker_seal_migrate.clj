@@ -583,12 +583,47 @@
   and cannot seal anything. It is the smoke alarm for the one failure the shapes
   cannot report about themselves: a payload that holds a description somewhere
   `prose-paths` does not look, which would be walked by nobody, counted as clean,
-  and left in the clear. Compared against the number of paths actually found, so
-  the shapes that hold *no* literal `\"description\":\"…\"` — an update's
-  `{:field \"description\" …}`, a multi-field `{:changes {:description {…}}}`, a
-  dropped write's escaped body — cannot make it fire, and neither can a
-  description whose value is empty."
+  and left in the clear.
+
+  It is compared against `matchable-paths` below, and **not** against the number
+  of paths found, which is what it used to be. The shapes that hold no literal
+  `\"description\":\"…\"` — an update's `{:field \"description\" …}`, a
+  multi-field `{:changes {:description {…}}}`, a dropped write's escaped body —
+  still cannot make it fire, and neither can a description whose value is empty."
   #"\"description\"\s*:\s*\"[^\"]")
+
+(defn- matchable-paths
+  "How many of the paths `prose-paths` found could have produced one of
+  `loose-description`'s matches. **Not the same as how many it found**, and that
+  difference was a hole in the alarm.
+
+  The regex matches a `\"description\"` *key* whose value is a non-empty string.
+  Two kinds of walked path cannot produce one:
+
+  - one whose value is blank — `\"description\":\"\"` has a quote where the regex
+    wants a character;
+  - one that is not spelled `\"description\": \"…\"` in the raw text at all —
+    `{:field \"description\" :old-value …}` puts the word on the value side of the
+    colon, `{:changes {:description {…}}}` puts an object after it, and a dropped
+    write's body is escaped inside a string.
+
+  Counting either of those as *found* let one of them cancel a real match. The
+  review measured it: `{:row {:description \"\"} :extra {:description \"prose
+  nobody walks\"}}` gave one match and one path, came out even, and the pass
+  reported a clean payload with a readable body in it. It needs a sixth shape and
+  a blank in the same payload, so it is contingent — and blanks are 1,634 of the
+  5,293 payload values on the dev file, so about a third of any such payload would
+  have slipped through."
+  [payload paths]
+  (count (for [[path _] paths
+               :when (= :description (last path))
+               :let [v (get-in payload path)]
+               ;; The regex's own test, not `blank-value?`: `\" \"` matches it,
+               ;; because a space is a character. Asking a different question here
+               ;; from the one the regex asks is how the two counts stop being
+               ;; comparable.
+               :when (and (string? v) (not= "" v))]
+           path)))
 
 (defn- judge-payload
   "One event payload, judged. `{:entries [{:bucket … :violation? …} …] :value …}`,
@@ -617,7 +652,8 @@
                 sealed (reduce (fn [p {:keys [path value]}]
                                  (if (some? value) (assoc-in p path value) p))
                                payload judged)
-                unwalked? (> (count (re-seq loose-description value)) (count paths))]
+                unwalked? (> (count (re-seq loose-description value))
+                             (matchable-paths payload paths))]
             {:entries (cond-> (vec judged)
                         (empty? judged) (conj {:bucket :no-prose})
                         unwalked? (conj {:bucket :unwalked :violation? true}))
