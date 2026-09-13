@@ -1401,7 +1401,7 @@
                (if-not (= :restrict (:cause (ex-data e)))
                  (throw e)
                  (throw (ex-info (str (ex-message e) ". The flags this program has are "
-                                      (str/join ", " (map #(str "--" (name %)) (keys cli-spec)))
+                                      (str/join ", " (sort (map #(str "--" (name %)) (keys cli-spec))))
                                       ". One it does not know selects no mode, and the mode"
                                       " nothing selects is the pass — which writes, and is not"
                                       " reversible without the key and a second downtime.")
