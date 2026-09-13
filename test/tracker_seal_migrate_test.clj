@@ -867,14 +867,24 @@
 
     (testing "**the negative control, and it is the one that matters**: an envelope
       sealed under another key is still reported as one, with the two causes that
-      are now the only two it can have"
-      (let [db (clean-db)]
+      are now the only two it can have.
+
+      **The fixture's body used to be the words `sealed under another key`**,
+      which are also in the program's explanation — so the assertion below was
+      green whether it was reading the explanation or a leaked body, and could
+      not tell the two apart. A sentinel that collides with the output it is
+      asserted against is a check that cannot fail for the reason it was written
+      for. The body is now something this program could never say."
+      (let [db (clean-db)
+            body "unopenable-fixture-body-🦫-nothing-here-says-this"]
         (insert! db :tasks {:id 91 :user_id daniel :title "foreign"
-                            :description (sealed @other-key "sealed under another key")})
+                            :description (sealed @other-key body)})
         (let [{:keys [exit out]} (run-script "--user" "daniel" db)]
           (is (= 1 exit))
           (is (str/includes? out "unopenable 1"))
-          (is (str/includes? out "sealed under another key"))
+          (is (str/includes? out "sealed under another key")
+              "the explanation, which is the program's and cannot be the body")
+          (is (not (str/includes? out body)) "and the body itself is never printed")
           (is (not (str/includes? out "NOT-ENVELOPE"))))))
 
     (testing "the question itself, which is about shape and never about a key: what
@@ -892,6 +902,36 @@
       (is (seal/envelope-shaped? (str seal/envelope-prefix (apply str (repeat 40 "A"))))
           "base64 of 30 bytes: shaped like one, and whether it opens is another
            question and needs the key"))
+
+    (testing "**and in the unseal direction, which the commit that added this
+      claimed and no test travelled.** Found by probing rather than by reading:
+      replacing the branch's body with a throw changed no test's result, so
+      nothing drove it — the seal direction was covered and the sentence *a
+      violation in both directions* was an assertion about code nobody ran.
+
+      It is reachable, and by the operator most likely to meet it: the escape
+      hatch, over the very database the S1 row stopped. `--unseal` cannot open a
+      body that begins with the prefix and is not an envelope, because there is
+      nothing there to open — it is already the plaintext this direction is
+      walking towards — so it is named rather than unsealed, and the run does not
+      claim to have finished."
+      (let [db (clean-db)]
+        (insert! db :tasks {:id 92 :user_id daniel :title "a note" :description note})
+        (is (= 1 (:exit (run-script "--user" "daniel" db)))
+            "seal first — and the pass is already 1, because the note is one of the
+             values it cannot account for")
+        (is (= 1 (:exit (run-script "--verify" "--user" "daniel" db))))
+        (let [{:keys [exit out]} (run-script "--unseal" "--user" "daniel" db)]
+          (is (= 1 exit) "the unseal cannot call itself finished either")
+          (is (str/includes? out "NOT-ENVELOPE") "its own column in the unseal headings too")
+          (is (str/includes? out "not an envelope at all")))
+        (is (= note (value db :tasks :description "id=92")) "and the body is untouched")
+        (let [{:keys [exit out]} (run-script "--verify" "--inverse" "--user" "daniel" db)]
+          (is (= 1 exit))
+          (is (not (str/includes? out "The invariant holds"))
+              "the headline and the exit code are one answer here too")
+          (is (str/includes? out "id 92"))
+          (is (str/includes? out "is not an envelope")))))
 
     (testing "inside a payload too, since that is where 3,659 of the values are"
       (let [db (clean-db)]
@@ -1186,6 +1226,34 @@
              (refusal))
            ours)
           "and with one that carries no ex-data to read")))
+
+  (testing "**the backstop, which nothing drove until a probe said so.** Every
+    flag this program does not have is refused off argv before the parser runs, so
+    what reaches `parse-args`'s `catch` is one of *its* refusals — a missing value,
+    a negation it will not take — or a disagreement about what a flag is. That
+    path adds the list of flags and nothing else, because whatever went wrong the
+    operator's next move is to retype one.
+
+    It is driven here with a replaced parser rather than with a command line,
+    deliberately. A command line that reaches it does so because `babashka.cli`
+    refuses that particular shape, which is the dependency choosing the branch
+    again — the thing three commits have now been spent removing. Injecting the
+    refusal makes the branch certain and makes the asserted text *ours*: the
+    message below is the one this test threw."
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"a refusal this test invented\. The flags this program has are"
+         (with-redefs [cli/parse-args (fn [& _] (throw (ex-info "a refusal this test invented" {})))]
+           (parse! ["--user" "daniel" "a.db"]))))
+    (testing "and the command lines that reach it in practice are refused, whichever
+      of the two rules catches them — which is the part worth asserting about a
+      real argv, since which rule that is belongs to the parser and not to us"
+      (doseq [args [["--no-user"] ["--user" "--verify"]]]
+        (let [db (clean-db)
+              before (digest db)
+              {:keys [exit err]} (apply run-script (concat args [db]))]
+          (is (= 2 exit) (pr-str args))
+          (is (seq err) (str "and says something: " (pr-str args)))
+          (is (= before (digest db)) (str (pr-str args) " left the file byte-identical"))))))
 
   (testing "and the flags it does have still work, which is what makes the above a
     fix rather than a wall"
