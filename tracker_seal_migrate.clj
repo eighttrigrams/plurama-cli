@@ -128,6 +128,16 @@
   It arms the human and not his machine users, because the server resolves the
   flag through an identity that has already collapsed a machine user onto him.
 
+  **And the mirror of that refusal, which is the first act of getting back.**
+  `--unseal` over an armed database is refused too. It reaches the same state from
+  the other side — the flag set over a database of plaintext — and it used to
+  reach it in silence: every body readable and none of them saveable, which is a
+  400 per the plan's guard table and another downtime to undo. The playbook's
+  *Getting back* is `--disarm` and then `--unseal` for exactly this reason; the
+  program is now what makes the order true rather than the operator's memory.
+  `--dry-run --unseal` is left alone deliberately: it writes nothing, and a
+  rehearsal that shows the flag still up is the cheapest moment to find that out.
+
   ## Why it refuses to run without a key
 
   Every other client in this system treats *no key* as *sealing off*, which is
@@ -998,6 +1008,52 @@
                          " understand would change nothing while reporting that it had.")
                     {}))))
 
+(defn- flag-state
+  "`users.seal_prose` for one user: `:armed`, `:clear`, or `:absent` when the
+  column is not there at all.
+
+  **Read in every mode**, because the flag is half of what the state of a cutover
+  is, and finding out which half should not cost a second command at the hour
+  this is run. `--arm` and `--disarm` are the two that cannot proceed without the
+  column, and they refuse for themselves in `require-flag-column!`; everything
+  else says what it found in the header and carries on."
+  [db user-id]
+  (if-not (seal-prose-column? db)
+    :absent
+    (if (= "1" (str/trim (str (one db (str "SELECT seal_prose FROM users WHERE id = "
+                                           user-id ";")))))
+      :armed
+      :clear)))
+
+(defn- refuse-unseal-while-armed!
+  "The mirror of `--arm`'s refusal, and it was missing.
+
+  `--arm` will not arm over an unfinished pass, because a flag set over plaintext
+  rows turns every one of them into a row that cannot be saved. **The same state
+  is reachable from the other side**, and was reachable in silence: unseal an
+  armed database and the flag is still 1 over a database in which every one of
+  his bodies is now plaintext. Per the plan's own guard table, *plaintext
+  differing from stored* is a 400 — he can read everything and save no body, and
+  recovery is another downtime.
+
+  So the program insists on the order the procedure already keeps. The playbook's
+  *Getting back* is `--disarm` and then `--unseal`, two commands in that order for
+  exactly this reason; what was missing was anything that made the order true
+  rather than remembered.
+
+  Only the write is refused. `--dry-run --unseal` is left alone deliberately: it
+  writes nothing, and a rehearsal that shows the flag still up is the cheapest
+  possible moment to find that out."
+  [username]
+  (throw (ex-info (str "users.seal_prose is 1 for " username ", and unsealing while it is"
+                       " would leave the flag set over a database of plaintext — which is"
+                       " the state --arm refuses to create, arrived at from the other side."
+                       " The server would then refuse every body he saved, with a 400, while"
+                       " letting him read all of them; getting back out of that is another"
+                       " downtime. Run --disarm first and --unseal second: the playbook's"
+                       " *Getting back* is two commands in that order for this reason.")
+                  {})))
+
 (defn- set-flag!
   "`users.seal_prose`, for one user and nobody else. Answers whether it moved.
 
@@ -1058,7 +1114,10 @@
   (println "              while anything of his is still unsealed: a flag armed over")
   (println "              an unfinished pass turns every remaining plaintext row into")
   (println "              a row that cannot be saved. Run it last.")
-  (println "  --disarm    set it back to 0. Do this before --unseal, not after.")
+  (println "  --disarm    set it back to 0, which is the first act of getting back.")
+  (println "              --unseal is refused while the flag is up, for the reason")
+  (println "              --arm is refused over an unfinished pass: it is the same")
+  (println "              unusable state reached from the other side.")
   (println "  --verbose   one line per row written — table, id, columns. Never a value.")
   (println)
   (println "No other user's rows are read or written, in any mode, and neither is")
@@ -1072,7 +1131,7 @@
   (println "Back the database up first, and open the backup. This rewrites in place."))
 
 (defn- print-header
-  [{:keys [mode direction db source k user journal strays foreign clear]}]
+  [{:keys [mode direction db source k user journal strays foreign clear flag]}]
   (println)
   (println (str "tracker seal walk — "
                 (case mode
@@ -1088,6 +1147,12 @@
                      (str ", with " (plural (count (:machine-ids user)) "machine user")
                           " acting for him (" (str/join ", " (:machine-ids user)) ")")
                      "")))
+  (println (format "  %-10s %s" "flag"
+                   (case flag
+                     :armed (str "users.seal_prose is 1 for " (:username user) " — armed")
+                     :clear (str "users.seal_prose is 0 for " (:username user) " — not armed")
+                     :absent (str "no users.seal_prose column here; migration"
+                                  " 074-add-seal-prose has not run against this file"))))
   (println (format "  %-10s %s" "journal" journal))
   (when foreign
     (println (format "  %-10s %s belonging to other users, and not read" "elsewhere"
@@ -1241,12 +1306,19 @@
               source (seal/key-source)
               user (resolve-user! db (:user opts))
               ids (:ids user)
+              flag (flag-state db (:id user))
               journal (str/trim (str (one db "PRAGMA journal_mode;")))
               walking? (not= :disarm mode)
               foreign (when walking? (vec (foreign-audit db ids)))
               clear (when walking? (clear-audit db))]
+          ;; **Before the header and before the walk**, like every other refusal here:
+          ;; a run that should not happen should not start by printing as though it
+          ;; were happening.
+          (when (and (= :pass mode) (= :unseal direction) (= :armed flag))
+            (refuse-unseal-while-armed! (:username user)))
           (print-header {:mode mode :direction direction :db db :source source :k k :user user
-                         :journal journal :strays strays-before :foreign foreign :clear clear})
+                         :journal journal :strays strays-before :foreign foreign :clear clear
+                         :flag flag})
           (when (= :disarm mode)
             (let [moved? (set-flag! db (:id user) false)]
               (println)

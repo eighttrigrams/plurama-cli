@@ -938,6 +938,73 @@
       (is (= 2 (:exit (run-script "--arm" "--unseal" "--user" "daniel" db))))
       (is (= "0" (flag db "daniel"))))))
 
+(deftest unsealing-over-an-armed-database-is-refused-and-says-which-order
+  (testing "**`--arm` refuses over an unfinished pass, and the mirror case was not
+    enforced at all.** The suite's own words for why the first refusal exists are
+    *the program is what enforces that rather than the operator's memory* — and
+    `--unseal` over an armed database succeeded in silence, leaving exactly the
+    state `--arm` exists to prevent: the flag set, and every one of his bodies in
+    the clear.
+
+    Per the plan's guard table, *plaintext differing from stored* is a **400**. He
+    could read everything and save no body. Getting out of that is another
+    downtime, and it is reached by running *Getting back*'s two commands in the
+    wrong order, or by forgetting the first."
+    (let [db (clean-db)]
+      (is (= 0 (:exit (run-script "--user" "daniel" db))))
+      (is (= 0 (:exit (run-script "--arm" "--user" "daniel" db))))
+      (is (= "1" (flag db "daniel")))
+
+      (let [{:keys [exit err]} (run-script "--unseal" "--user" "daniel" db)]
+        (is (= 2 exit))
+        (is (str/includes? err "--disarm") "and it names the command that comes first")
+        (is (str/includes? err "seal_prose")))
+      (is (seal/sealed? (value db :tasks :description "id=1"))
+          "and not one body was opened")
+      (is (= "1" (flag db "daniel")) "and the flag was not touched either")
+
+      (testing "`--inverse` is the same run by its other name, so it is the same
+        refusal — a synonym the procedure uses is not a way around a guard"
+        (is (= 2 (:exit (run-script "--inverse" "--user" "daniel" db))))
+        (is (seal/sealed? (value db :tasks :description "id=1"))))
+
+      (testing "**a dry run is not refused**, and that is the point of having one:
+        it writes nothing, so the cheapest moment to find out the flag is still up
+        is before the command that would have mattered"
+        (let [{:keys [exit out]} (run-script "--dry-run" "--unseal" "--user" "daniel" db)]
+          (is (= 0 exit))
+          (is (str/includes? out "seal_prose is 1"))
+          (is (seal/sealed? (value db :tasks :description "id=1")))))
+
+      (testing "and in the order the playbook's *Getting back* already gives, all
+        three rungs answer 0"
+        (is (= 0 (:exit (run-script "--disarm" "--user" "daniel" db))))
+        (is (= 0 (:exit (run-script "--unseal" "--user" "daniel" db))))
+        (is (= 0 (:exit (run-script "--verify" "--inverse" "--user" "daniel" db))))
+        (is (= "a body" (value db :tasks :description "id=1"))))))
+
+  (testing "the flag is in the header of every run, in every mode, because it is
+    half of what the state of a cutover is and reading it should not cost a second
+    command"
+    (let [db (clean-db)]
+      (is (str/includes? (:out (run-script "--dry-run" "--user" "daniel" db))
+                         "seal_prose is 0 for daniel — not armed"))
+      (run-script "--user" "daniel" db)
+      (run-script "--arm" "--user" "daniel" db)
+      (is (str/includes? (:out (run-script "--verify" "--user" "daniel" db))
+                         "seal_prose is 1 for daniel — armed"))))
+
+  (testing "a database the server's half has not reached yet has no flag to read,
+    and the walking modes say so rather than refusing: `--arm` and `--disarm` are
+    the two that cannot proceed without it, and they already refuse"
+    (let [db (clean-db)]
+      (sqlite! db "ALTER TABLE users DROP COLUMN seal_prose;")
+      (let [{:keys [exit out]} (run-script "--dry-run" "--user" "daniel" db)]
+        (is (= 0 exit))
+        (is (str/includes? out "074-add-seal-prose")))
+      (is (= 0 (:exit (run-script "--unseal" "--user" "daniel" db)))
+          "and an unseal over one is not refused: there is no flag to be wrong"))))
+
 ;; ---------------------------------------------------------------------------
 
 (defn- big-db
