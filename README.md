@@ -419,12 +419,100 @@ bundle meeting `enc:v1:…`. Afterwards the backups in `backups/` stop being
 plaintext copies of the shelf — the old tarballs still are, and restoring one
 lands back in plaintext.
 
+## `tracker-seal-migrate` — the pass that seals one user's prose
+
+`tracker_seal_migrate.clj` is the same pass asked a different question. Cookbook
+has one owner, so its walker seals a database; tracker has several users and
+exactly one of them holds a key, so this one seals **a user**:
+
+```bash
+bb tracker_seal_migrate.clj --user daniel --verify  data/tracker.db   # read-only, exits 1 if broken
+bb tracker_seal_migrate.clj --user daniel --dry-run data/tracker.db   # decide everything, write nothing
+bb tracker_seal_migrate.clj --user daniel           data/tracker.db   # seal
+bb tracker_seal_migrate.clj --user daniel --arm     data/tracker.db   # flip the gate, last
+bb tracker_seal_migrate.clj --user daniel --unseal  data/tracker.db   # the escape hatch
+```
+
+It runs from a checkout, needs `sqlite3` on `PATH`, and **refuses to run without
+a key** — for the reason cookbook's does: no key means passthrough everywhere
+else in this program, and here that would be a pass that walks the whole database,
+writes nothing, and reports success.
+
+**`--user` is required, and a default would be the one mistake with no cheap
+undo.** Guessing wrong seals rows nobody asked to seal, and getting back out of
+that needs the key *and* a second downtime. Named rows and their machine users
+are walked; every other user's rows are not read and not written, in any mode.
+
+**Nine description columns and the audit log.** `messages` and `mottos` stay
+clear permanently and are only counted — messages because three writers that hold
+no key produce them (the IMAP poller, the blog, tracker's own crawler), mottos
+because a motto body is a second name rather than prose. The log is sealed for the
+opposite reason: it is the one place where a deleted thing's prose outlives the
+thing, so leaving it would leave a plaintext copy of everything the pass had just
+sealed. Prose *inside* each payload is sealed; the titles beside it stay clear,
+because the server builds those payloads and holds no key.
+
+**Direct SQL, never the HTTP API** — and here that is not a preference. Writing
+through `PUT /api/tasks/:id` records an audit event per write, so a pass driven
+that way would fill the log it is in the middle of sealing, and would never
+converge.
+
+### `--arm` is a separate act, and it goes last
+
+`users.seal_prose` is the server's half: with it up, a write that introduces new
+plaintext prose into a sealed column is refused. The flag is not the seal and the
+seal is not the flag, so they are two flags on the command line:
+
+- **`--arm` refuses while anything of his is still unsealed.** A gate raised over
+  an unfinished pass turns every remaining plaintext row into a row that can be
+  read and not saved.
+- **`--disarm` is the first act of getting back out**, and `--unseal` is refused
+  while the gate is up — the same unusable state, reached from the other side.
+
+So: seal, verify, *then* arm. Getting back: disarm, unseal, verify.
+
+### What it prints, and when it exits non-zero
+
+The header names the key's source and its **fingerprint** — the same eight
+characters tracker's ⚙ panel shows. Sealing a database with a key the browser
+cannot open is the mistake here with no recovery, and comparing eight characters
+is the whole of how not to make it.
+
+`--verify` asserts the invariant in both directions: everything of his that must
+be sealed is, nothing of anybody else's is, and nothing at all in the tables that
+stay clear. With `--unseal` it asserts the inverse — no envelope anywhere.
+
+It **exits non-zero for anything it cannot call finished**, not only for a
+`--verify` violation: a value that carries the prefix and will not open with this
+key (`unopenable`), a value that carries the prefix and is not an envelope at all
+(`NOT-ENVELOPE`), an envelope inside an envelope (`NESTED`), a row that moved
+underneath the pass, or a `-wal`/`-journal` beside the database. Each prints a
+paragraph saying what it is and what to do. A summary line saying *done* over any
+of those would be the failure this project keeps catching in review.
+
+A second run changes nothing and says so. One row is one statement is one
+transaction, so an interrupted pass leaves a legal half-sealed database — mixed
+state is legal permanently, everywhere — and the next run picks up where it
+stopped. Each write carries the values it read in its `WHERE`, so a value that
+moved underneath the pass is reported rather than written over.
+
+**If the pass was interrupted, do not copy the database file. Run the pass again
+first** — the same rule, and the same reason, as cookbook's: opening the database
+is what repairs it, and the run that did the repairing is not the run whose exit
+code you should push on.
+
+The full production sequence — pulling the file off fly, the order the clients
+have to be deployed in, and what to check afterwards — is in
+`handoffs/tracker-seal-deploy-playbook.md`, because it is a downtime cutover and
+belongs in one place rather than two.
+
 ## The proxy holds the key, so the box does not
 
 `plurama_cli_proxy.clj` is the credential sidecar the devboxes talk to: the box
 gets a build of `plurama-cli` whose baked blob holds base-urls and no passwords,
-and this process attaches the credential on the way past. Since the cookbook seal
-it does the same thing with the key.
+and this process attaches the credential on the way past. Since the seal it does
+the same thing with the key — **for cookbook and for tracker, with a different
+key each**.
 
 - **Responses are unsealed** on the way back, so an agent in the box reads prose.
 - **Request prose is sealed** on the way out, so an agent writes prose.
@@ -433,39 +521,61 @@ it does the same thing with the key.
 The alternative was a key file mounted into the box, beside the credentials this
 whole program exists to keep out of it. It is the same trade the baked passwords
 were — except that a leaked password can be rotated and **a leaked key cannot**.
-It opens every Recipe the owner has ever written, and there is no re-encrypting
-them against a copy somebody took.
+It opens every Recipe the owner has ever written — and, with the second key,
+every description in his tracker — and there is no re-encrypting them against a
+copy somebody took. That is also why there are two keys rather than one for both
+apps: a leak that cannot be rotated out of the data should not cost two stores.
 
-The mount goes beside the credentials one, and the box gets neither:
+The mounts go beside the credentials one, and the box gets none of them:
 
 ```yaml
+environment:
+  BABASHKA_CLASSPATH: /app
 volumes:
   - ${HOME}/.local/share/plurama-cli/proxy-credentials.edn:/credentials.edn:ro
   - ${HOME}/.config/plurama-cli/cookbook-seal.key:/cookbook-seal.key:ro
-  - ${HOME}/path/to/plurama-cli/cookbook_seal.clj:/app/cookbook_seal.clj:ro
-environment:
-  BABASHKA_CLASSPATH: /app
+  - ${HOME}/.config/plurama-cli/tracker-seal.key:/tracker-seal.key:ro
+  - ../plurama-cli/seal_envelope.clj:/app/seal_envelope.clj:ro
+  - ../plurama-cli/cookbook_seal.clj:/app/cookbook_seal.clj:ro
+  - ../plurama-cli/tracker_seal.clj:/app/tracker_seal.clj:ro
+  - ../tracker/src/cljc/et/tr/seal_rules.cljc:/app/et/tr/seal_rules.cljc:ro
 ```
 
-The last two lines are not decoration. The proxy `require`s `cookbook_seal.clj`
-rather than carrying a second copy of the envelope, and **babashka puts neither
-the script's directory nor the working directory on the classpath by itself** — so
-that file has to be mounted and `BABASHKA_CLASSPATH` has to name where. If it is
-forgotten the proxy refuses to start, which is the loud half of the failure; the
-quiet half would have been two spellings of one envelope, which is the thing this
-project's reviews have caught twice.
+The four source mounts are not decoration. The proxy `require`s them rather than
+carrying a second copy of the envelope, and **babashka puts neither the script's
+directory nor the working directory on the classpath by itself** — so they have to
+be mounted and `BABASHKA_CLASSPATH` has to name where. If one is forgotten the
+proxy refuses to start, which is the loud half of the failure; the quiet half
+would have been two spellings of one envelope, which is the thing this project's
+reviews have caught twice.
 
-`PLURAMA_PROXY_SEAL_KEY` overrides the path. **No key configured is passthrough**,
+Four files and not one, because the shape says what is shared and what is not:
+one envelope (`seal_envelope.clj`) both apps use, one inventory per app saying
+which columns hold prose, and tracker's pure rules — which live in *tracker's*
+checkout, not here, because its server and its browser read that same file. Three
+implementations, one list.
+
+A bind mount whose source is missing does not fail: docker creates an empty
+**directory** at that path. So the key guard asks `.isFile`, not `.exists` — a
+directory is *no key*, which is passthrough, rather than a malformed key, which
+stops the process. That distinction was learned by crash-looping this sidecar.
+
+`PLURAMA_PROXY_SEAL_KEY` overrides cookbook's path and
+`PLURAMA_PROXY_TRACKER_SEAL_KEY` tracker's; the cookbook one keeps its
+app-less name because that is what the deployed boxes already set.
+**No key configured is passthrough**,
 byte for byte, which is this proxy before any of this existed and is right for a
 shelf nobody has sealed yet. A key that is there and malformed stops the process
 at `docker compose up`, before the line that says *listening*.
 
-The startup line names the source and prints the key's **fingerprint** — the same
-eight characters the web UI's ⚙ panel shows, so that *the proxy holds the key my
-browser holds* is a comparison anyone can make in five seconds:
+The startup lines — one per app — name the source and print the key's
+**fingerprint**, the same eight characters each web UI's ⚙ panel shows, so that
+*the proxy holds the key my browser holds* is a comparison anyone can make in five
+seconds:
 
 ```
  cookbook prose: sealed here, key /cookbook-seal.key fingerprint d53515b0
+ tracker prose: passthrough -- no key at /tracker-seal.key
 ```
 
 (`d53515b0` is the test key in `seal-vectors.edn`, so that the one example line
