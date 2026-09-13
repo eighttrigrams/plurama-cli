@@ -466,12 +466,18 @@
         (is (= 2 (count violations)))))
 
     (testing "and the inverse direction, which is what `--unseal` is checked with:
-      no envelope anywhere at all"
+      no envelope anywhere — and nothing this pass could not account for either"
       (is (pos? (count (:violations (pass db :verify :unseal)))))
       (pass db :pass :unseal)
       (let [{:keys [violations]} (pass db :verify :unseal)]
-        (is (= #{:sealed} (set (map :why violations))))
-        (is (= 1 (count violations)) "the one this key cannot open, and nothing else")))))
+        (is (= #{:sealed :odd} (set (map :why violations))))
+        (is (= 2 (count violations))
+            "the one this key cannot open, and the BLOB. The BLOB is a violation
+             whichever way the walk is going: nothing here converts one in either
+             direction, and it holds readable prose in both. It used to be a
+             violation in the seal direction only, while the exit code counted it
+             in both — so this run printed that the invariant held and exited 1.")))))
+
 
 (deftest the-scope-is-resolved-from-a-name-and-refused-rather-than-guessed
   (let [db (fresh-db)]
@@ -735,6 +741,56 @@
       (is (empty? (sidecars db)) "opening the database was the repair")
       (is (= 0 (:exit (run-script "--user" "daniel" db)))
           "and the next run, over the repaired file, is the one to trust"))))
+
+(deftest the-headline-and-the-exit-code-cannot-disagree
+  (testing "**`--verify --inverse` printed *The invariant holds, in both
+    directions.* and then exited 1.** `verdict` marked `:odd` and `:unwalked` as
+    violations only in the seal direction; `unfinished` counted them in both. So
+    the sentence and the exit code answered different questions, and the playbook's
+    *Getting back* ends on that exact command — *how you prove the hatch actually
+    opened rather than reported that it had*. An operator gets a green sentence
+    and a red exit code and no way to tell which to believe.
+
+    The two are reconciled the way the reviewer says reads truer: **a value this
+    pass could not account for is a violation whichever way the walk is going.**
+    A BLOB holding readable prose and a payload shape nothing walks are both
+    *readable prose this pass went past*, and neither becomes less so by the
+    direction of travel. Recipe 159 says BLOBs in prose columns are real —
+    *usually the residue of an earlier repair made in SQL* — and cookbook's own
+    shelf holds one."
+    (let [db (clean-db)]
+      (insert! db :tasks {:id 90 :user_id daniel :title "blob"
+                          :description [:blob "text, in a blob"]})
+      (let [{:keys [exit out]} (run-script "--verify" "--inverse" "--user" "daniel" db)]
+        (is (= 1 exit))
+        (is (not (str/includes? out "The invariant holds"))
+            "the headline and the exit code are one answer")
+        (is (str/includes? out "the invariant does not hold"))
+        (is (str/includes? out "id 90")))
+      (testing "and in the seal direction, which it already got right"
+        (is (= 1 (:exit (run-script "--verify" "--user" "daniel" db)))))))
+
+  (testing "the same for a payload shape `prose-paths` does not know"
+    (let [db (clean-db)]
+      (insert! db :events {:id 90 :effective_user_id daniel :action "invented"
+                           :payload (payload {:sixth-shape {:description "prose nobody walks"}})})
+      (let [{:keys [exit out]} (run-script "--verify" "--inverse" "--user" "daniel" db)]
+        (is (= 1 exit))
+        (is (not (str/includes? out "The invariant holds")))
+        (is (str/includes? out "id 90")))))
+
+  (testing "and the control, without which none of that means anything: over a
+    database with nothing wrong in it the hatch reports open and exits 0"
+    (let [db (clean-db)]
+      (let [{:keys [exit out]} (run-script "--verify" "--inverse" "--user" "daniel" db)]
+        (is (= 0 exit))
+        (is (str/includes? out "The invariant holds, in both directions.")))
+      (testing "including after a real round trip, which is what the playbook runs"
+        (is (= 0 (:exit (run-script "--user" "daniel" db))))
+        (is (= 0 (:exit (run-script "--unseal" "--user" "daniel" db))))
+        (let [{:keys [exit out]} (run-script "--verify" "--inverse" "--user" "daniel" db)]
+          (is (= 0 exit))
+          (is (str/includes? out "The invariant holds, in both directions.")))))))
 
 (deftest a-flag-this-does-not-know-is-a-refusal-and-never-a-pass
   (testing "**Every deliberate mistake here is already caught and only a typo got

@@ -487,17 +487,32 @@
   this key opens; in the unseal direction none of them may be an envelope at all.
   The *other* half of the invariant — that nothing outside the scope is sealed —
   is `foreign-audit`, which asks it of the database rather than of a value, and
-  needs no key to do it."
+  needs no key to do it.
+
+  ## A value this pass cannot account for is a violation in **both** directions
+
+  `:odd` used to be one only in the seal direction, while `unfinished` counted it
+  in both — so `--verify --inverse` printed *The invariant holds, in both
+  directions.* and exited 1 over the same database, and the playbook's *Getting
+  back* ends on exactly that command, calling it *how you prove the hatch
+  actually opened rather than reported that it had*. A headline and an exit code
+  that answer different questions are worse than either answer alone.
+
+  They are reconciled towards the stricter reading, because it is the truer one.
+  A BLOB holding readable prose, and a payload shape nothing walks, are
+  **readable prose this pass went past** — and neither becomes less so by the
+  direction of travel. Nothing here will convert one, in either direction, so
+  neither direction can call a database holding one finished."
   [direction k aad {:keys [type value]}]
   (cond
     (= :null type) [:null false]
     (and (= :text type) (seal/blank-value? value)) [:blank false]
 
-    ;; **A violation in the seal direction, and that is the point of the bucket.**
-    ;; A BLOB holding readable prose is prose in the clear; `decide` will not seal
-    ;; it, so a verify that called it merely odd would report a holding invariant
-    ;; over a line anybody with the file can read.
-    (not= :text type) [:odd (= :seal direction)]
+    ;; **A violation whichever way this is going**, and that is the point of the
+    ;; bucket. A BLOB holding readable prose is prose in the clear; `decide` will
+    ;; not convert it in either direction, so a verify that called it merely odd
+    ;; would report a holding invariant over a line anybody with the file can read.
+    (not= :text type) [:odd true]
 
     (= :unseal direction)
     (if (seal/sealed? value) [:sealed true] [:plain false])
@@ -553,18 +568,20 @@
   Every prose value inside gets its own entry and its own bucket, because that is
   what the counts are for; the row is written once, with all of them.
 
-  A payload that is not JSON at all is `:odd` and a violation in the seal
-  direction, for the reason a BLOB in a prose column is: unreadable to this pass
-  is not the same as holding nothing, and the operator should look."
+  A payload that is not JSON at all is `:odd` and a violation in **both**
+  directions, for the reason a BLOB in a prose column is: unreadable to this pass
+  is not the same as holding nothing, and the operator should look. So is a
+  payload holding a description in a shape `prose-paths` does not know — prose
+  this pass went past, which it went past going either way."
   [ctx {:keys [type value]}]
   (let [direction (:direction ctx)]
     (cond
       (= :null type) {:entries [{:bucket :blank}]}
-      (not= :text type) {:entries [{:bucket :odd :violation? (= :seal direction)}]}
+      (not= :text type) {:entries [{:bucket :odd :violation? true}]}
       :else
       (let [payload (parse-payload value)]
         (if (= unparseable payload)
-          {:entries [{:bucket :odd :violation? (= :seal direction)}]}
+          {:entries [{:bucket :odd :violation? true}]}
           (let [paths (seal/prose-paths payload)
                 judged (for [[path aad] paths]
                          (assoc (judge ctx aad (json-cell (get-in payload path))) :path path))
@@ -574,7 +591,7 @@
                 unwalked? (> (count (re-seq loose-description value)) (count paths))]
             {:entries (cond-> (vec judged)
                         (empty? judged) (conj {:bucket :no-prose})
-                        unwalked? (conj {:bucket :unwalked :violation? (= :seal direction)}))
+                        unwalked? (conj {:bucket :unwalked :violation? true}))
              :value (when (some :value judged) (json/generate-string sealed))}))))))
 
 (defn- judge-row
@@ -840,12 +857,12 @@
                       [:odd "odd"] [:unwalked "UNWALKED"] [:skipped-moved "moved"]]
    [:pass :unseal]   [[:changed "unsealed"] [:already "plain"] [:blank "blank"]
                       [:no-prose "no-prose"] [:unopenable "unopenable"] [:nested "NESTED"]
-                      [:odd "odd"] [:unwalked "unwalked"] [:skipped-moved "moved"]]
+                      [:odd "odd"] [:unwalked "UNWALKED"] [:skipped-moved "moved"]]
    [:verify :seal]   [[:sealed "sealed"] [:plain "PLAINTEXT"] [:blank "blank"] [:null "null"]
                       [:no-prose "no-prose"] [:unopenable "UNOPENABLE"] [:nested "NESTED"]
                       [:odd "odd"] [:unwalked "UNWALKED"]]
    [:verify :unseal] [[:plain "plain"] [:sealed "SEALED"] [:blank "blank"] [:null "null"]
-                      [:no-prose "no-prose"] [:odd "odd"] [:unwalked "unwalked"]]})
+                      [:no-prose "no-prose"] [:odd "odd"] [:unwalked "UNWALKED"]]})
 
 (defn- print-counts [mode direction by-table]
   (let [cols (get headings [(if (= :verify mode) :verify :pass) direction])
