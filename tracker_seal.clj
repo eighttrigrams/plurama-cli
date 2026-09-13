@@ -109,6 +109,8 @@
 (def sealed-in rules/sealed-in)
 (def prose-paths rules/prose-paths)
 (def body-prose-paths rules/body-prose-paths)
+(def entity-type->table rules/entity-type->table)
+(def clear-entity-type? rules/clear-entity-type?)
 (def api-segment->table rules/api-segment->table)
 (def endpoint-table rules/endpoint-table)
 (def endpoint-id rules/endpoint-id)

@@ -82,6 +82,23 @@
   bodies are written by three producers that hold no key; a motto's description
   is a second name and not prose. `et.tr.seal-rules/clear-tables` argues both.
 
+  **Their prose *in the log* is a different question, and the answer is the other
+  way round.** The pass seals the historical log wholesale, payloads about
+  `messages` and `mottos` included, because the audit log is the one place where a
+  deleted thing's prose outlives the thing: a converted message is `DELETE`d in
+  the same transaction that creates the task, so the `:snapshot` in
+  `events.payload` is the only copy of that body left. Leaving it clear would undo
+  the conversion rule one step further down.
+
+  Going forward the server writes those payloads in the clear, because it holds no
+  key and never will — so `--verify` **accepts** clear prose in an event whose
+  `entity_type` maps to a clear table, and counts it. Calling it a violation would
+  make `--verify` permanently red within hours of the cutover, which would cost
+  the one thing it is for: being the gate the cutover turns on.
+  `et.tr.seal-rules/entity-type->table` is the vocabulary that tells the two
+  apart, and `check-inventory!` and `check-entity-types!` are what stop it going
+  stale in either direction.
+
   **That one is asked rather than assumed, too**, and for a while it was not.
   `--verify` reported *nothing of anybody else's is sealed*, which is a different
   sentence from *nothing that must stay clear is sealed* — and since nothing here
@@ -212,7 +229,24 @@
   (when-not (= (set walked) (set (keys seal/bound-as)))
     (throw (ex-info (str "the walk and the bindings disagree about which tables are sealed: "
                          (pr-str (sort (map name walked))) " vs "
-                         (pr-str (sort (map name (keys seal/bound-as))))) {}))))
+                         (pr-str (sort (map name (keys seal/bound-as))))) {})))
+  ;; **The third half, and it is policed in both directions.**
+  ;; `entity-type->table` is what tells an event about `messages` from an event
+  ;; about `tasks`, which is what lets `--verify` accept prose a keyless writer
+  ;; left clear. A name in it that this program does not know is a mapping that
+  ;; cannot be acted on; a sealed table that no entity type reaches is a table
+  ;; whose events would all be judged as if they were about nothing — the quiet
+  ;; failure a tenth sealed column would produce.
+  (let [named (set (keep identity (vals seal/entity-type->table)))
+        unknown (remove #(or (contains? seal/sealed-columns %) (contains? seal/clear-tables %)) named)
+        unreached (remove named (keys seal/sealed-columns))]
+    (when (seq unknown)
+      (throw (ex-info (str "et.tr.seal-rules/entity-type->table names tables this program does not"
+                           " know: " (pr-str (sort (map name unknown)))) {})))
+    (when (seq unreached)
+      (throw (ex-info (str "no entity type maps to " (pr-str (sort (map name unreached)))
+                           ", so nothing could tell an event about one from an event about"
+                           " nothing. Add it to et.tr.seal-rules/entity-type->table.") {})))))
 
 (defn- owner-column
   "Which column says whose row this is.
@@ -362,8 +396,17 @@
 ;; ---------------------------------------------------------------------------
 ;; Reading. Scoped, always.
 
-(defn- select-sql [table ids]
+(defn- select-sql
+  "One table's in-scope rows. **The audit log reads one column more than the
+  others: `entity_type`, which is what the event was about.**
+
+  It is not a value, it is never written, and nothing is decided by it in the
+  seal direction — the pass seals the log wholesale. It is how `--verify` tells a
+  payload about `messages` from a payload about `tasks`, which are the same shape
+  and mean opposite things about prose found in the clear."
+  [table ids]
   (str "SELECT t.id, "
+       (when (= events-table table) "COALESCE(t.entity_type, '') || '|' || ")
        (str/join ", " (for [c (value-columns table)]
                         (str "typeof(t." (name c) ") || ':' || hex(t." (name c) ")")))
        " FROM " (name table) " t"
@@ -381,12 +424,19 @@
   so `IN` excludes them and says so by saying nothing. `foreign-audit` below is
   what accounts for all of them, in counts rather than in values."
   [db table ids]
-  (let [columns (value-columns table)]
+  (let [columns (value-columns table)
+        log? (= events-table table)]
     (for [line (rows db (select-sql table ids))
           :let [fields (str/split line #"\|" -1)
-                [id & cells] fields]]
-      {:id (parse-long id)
-       :cells (zipmap columns (map cell cells))})))
+                [id & after-id] fields
+                ;; The audit log puts `entity_type` between the id and the cells.
+                ;; A `|` cannot reach here from the value side — cells are
+                ;; `typeof:hex` — and `entity_type` is a bare word the server
+                ;; chose, so the split stays unambiguous.
+                [entity-type cells] (if log? [(first after-id) (rest after-id)] [nil after-id])]]
+      (cond-> {:id (parse-long id)
+               :cells (zipmap columns (map cell cells))}
+        log? (assoc :entity-type entity-type)))))
 
 ;; ---------------------------------------------------------------------------
 ;; The decision, one value at a time. Pure, and the only part of this worth a
@@ -637,7 +687,7 @@
   is not the same as holding nothing, and the operator should look. So is a
   payload holding a description in a shape `prose-paths` does not know — prose
   this pass went past, which it went past going either way."
-  [ctx {:keys [type value]}]
+  [ctx {:keys [type value]} entity-type]
   (cond
     (= :null type) {:entries [{:bucket :blank}]}
     (not= :text type) {:entries [{:bucket :odd :violation? true}]}
@@ -646,8 +696,25 @@
       (if (= unparseable payload)
         {:entries [{:bucket :odd :violation? true}]}
         (let [paths (seal/prose-paths payload)
+              ;; **The one thing the entity type decides, and it decides it only
+              ;; here.** The pass seals the log wholesale, so `decide` never sees
+              ;; this; what it changes is whether `--verify` calls plaintext a
+              ;; violation. A `messages` or `mottos` event is written in the clear
+              ;; by a server that holds no key and never will, so counting those
+              ;; as violations makes `--verify` permanently red within hours of the
+              ;; cutover — useless as the gate the cutover turns on.
+              ;;
+              ;; Only a value that *would* have been a violation is reclassified,
+              ;; which keeps this out of the unseal direction without asking about
+              ;; the direction: there, plaintext is what is wanted and is no
+              ;; violation to begin with.
+              clear? (seal/clear-entity-type? entity-type)
+              accept (fn [e] (if (and clear? (:violation? e) (= :plain (:bucket e)))
+                               (assoc e :bucket :clear-entity :violation? false)
+                               e))
               judged (for [[path aad] paths]
-                       (assoc (judge ctx aad (json-cell (get-in payload path))) :path path))
+                       (accept (assoc (judge ctx aad (json-cell (get-in payload path)))
+                                      :path path)))
               sealed (reduce (fn [p {:keys [path value]}]
                                (if (some? value) (assoc-in p path value) p))
                              payload judged)
@@ -664,9 +731,9 @@
   The nine tables answer one entry per sealed column. The audit log answers one
   entry per prose value inside its payload and one changed column, since the
   document is written back whole."
-  [ctx table {:keys [cells]}]
+  [ctx table {:keys [cells entity-type]}]
   (if (= events-table table)
-    (let [{:keys [entries value]} (judge-payload ctx (get cells :payload))]
+    (let [{:keys [entries value]} (judge-payload ctx (get cells :payload) entity-type)]
       {:entries (map #(assoc % :column :payload) entries)
        :changed (when (some? value) {:payload value})})
     (let [entries (for [c (value-columns table)]
@@ -966,7 +1033,8 @@
                       [:no-prose "no-prose"] [:unopenable "unopenable"]
                       [:not-an-envelope "NOT-ENVELOPE"] [:nested "NESTED"]
                       [:odd "odd"] [:unwalked "UNWALKED"] [:skipped-moved "moved"]]
-   [:verify :seal]   [[:sealed "sealed"] [:plain "PLAINTEXT"] [:blank "blank"] [:null "null"]
+   [:verify :seal]   [[:sealed "sealed"] [:plain "PLAINTEXT"] [:clear-entity "clear-entity"]
+                      [:blank "blank"] [:null "null"]
                       [:no-prose "no-prose"] [:unopenable "UNOPENABLE"]
                       [:not-an-envelope "NOT-ENVELOPE"] [:nested "NESTED"]
                       [:odd "odd"] [:unwalked "UNWALKED"]]
@@ -1073,6 +1141,35 @@
         missing (remove present (conj (map name walked) "users"))]
     (when (seq missing)
       (throw (ex-info (str "not a tracker database: no " (str/join ", " missing)) {})))))
+
+(defn- check-entity-types!
+  "Every `events.entity_type` in this database must be one the vocabulary knows.
+
+  `check-inventory!` polices the map against the inventory; this polices it
+  against the file, which is the half that catches a *new* entity type — a kind
+  of row the server started writing since anybody last looked here.
+
+  **It is a refusal and not a default**, because both defaults are wrong. Treated
+  as clear, its prose is left readable by the one tool that exists to say it is
+  not. Treated as sealed, it stops a cutover for no reason at all. Neither is a
+  thing to guess at, and the fix is one line in the `.cljc` where the server, the
+  browser and this file all read it.
+
+  Asked of the whole table and not of the scope: an entity type nobody here maps
+  is a fact about the schema, not about whose rows they are, and finding it out
+  from antonio's rows is as good as finding it out from daniel's."
+  [db]
+  (let [present (remove str/blank? (rows db "SELECT DISTINCT COALESCE(entity_type, '') FROM events;"))
+        unknown (sort (remove #(contains? seal/entity-type->table %) present))]
+    (when (seq unknown)
+      (throw (ex-info (str "this database holds "
+                           (plural (count unknown) "entity_type value")
+                           " nothing here maps: " (str/join ", " (map pr-str unknown))
+                           ". Add them to et.tr.seal-rules/entity-type->table, which is what tells"
+                           " an event about a table that stays clear from an event about one that"
+                           " does not. Guessing either way is wrong: clear by accident leaves prose"
+                           " readable, sealed by accident stops the cutover.")
+                      {})))))
 
 (defn- sidecars
   "The files beside a database that **hold state the `.db` alone does not**, named
@@ -1534,6 +1631,11 @@
       ;; which is otherwise read-only to the byte, performs that one write.
       (let [strays-before (sidecars db)]
         (check-database! db)
+        ;; After the tables are known to exist and before a value is read: the
+        ;; vocabulary has to answer for every row this walk will judge, and a
+        ;; database holding a kind of event nobody mapped is a refusal rather
+        ;; than a walk with one silent assumption in it.
+        (check-entity-types! db)
         ;; Asked here rather than at the moment of the write, so that a database
         ;; the server's half of the seal has not reached yet is refused before a
         ;; walk over it rather than after one.
@@ -1584,6 +1686,7 @@
                 violations (-> (vec (:violations total)) (into elsewhere) (into in-the-clear))
                 moved (:moved total)
                 unopenable (get total :unopenable 0)
+                clear-entity (get total :clear-entity 0)
                 not-an-envelope (get total :not-an-envelope 0)
                 odd (get total :odd 0)
                 nested (get total :nested 0)
@@ -1665,6 +1768,17 @@
               (println "  They were left exactly as they are: either they were sealed under another key,")
               (println "  or they are damaged, and neither is a thing a pass can fix as it goes. Check")
               (println "  the fingerprint above against the one in the browser's ⚙ panel."))
+            (when (pos? clear-entity)
+              (println)
+              (println (str "  " (plural clear-entity "value" "is" "are")
+                            " prose in the log about a table that stays clear."))
+              (println "  Accepted, and counted rather than passed over: `messages` and `mottos`")
+              (println "  rows are written by producers that hold no key, so the log's copy of one")
+              (println "  arrives in the clear and nothing can seal it as it is written. The pass")
+              (println "  seals whatever is in the log when it runs — a deleted message's snapshot")
+              (println "  is the only copy of that body left — so this number is 0 immediately")
+              (println "  after a cutover and grows afterwards. That is the seal holding, not")
+              (println "  failing."))
             (when (pos? not-an-envelope)
               (println)
               (println (str "  " (plural not-an-envelope "value" "carries" "carry")

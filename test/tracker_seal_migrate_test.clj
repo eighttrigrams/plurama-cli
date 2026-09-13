@@ -47,6 +47,7 @@
 (def ^:private unknown-flags @#'walk/unknown-flags)
 (def ^:private typed-as @#'walk/typed-as)
 (def ^:private parse! @#'walk/parse!)
+(def ^:private check-inventory! @#'walk/check-inventory!)
 
 (def ^:private repo-root
   "The suite runs from the repo root — `bb test` says so — and the tests that
@@ -1372,6 +1373,110 @@
         (is (str/includes? out "set_on") "named by the column that carries it")
         (is (str/includes? out (str "id " daniel))
             "and by its rowid, which for this table is the user_id")))))
+
+(deftest an-event-about-a-table-that-stays-clear-may-hold-clear-prose
+  (testing "**The pass seals the historical log wholesale, including payloads
+    about `messages` and `mottos`.** That is the decision and it is not an
+    oversight: the audit log is the one place where a deleted thing's prose
+    outlives the thing. A converted message is `DELETE`d in the same transaction
+    that creates the task, so the `:snapshot` in `events.payload` is the only copy
+    of that body left — leaving it clear would undo the conversion rule one step
+    further down."
+    (let [db (clean-db)]
+      (insert! db :events {:id 50 :effective_user_id daniel :action "delete"
+                           :entity_type "message" :entity_id 1
+                           :payload (payload {:snapshot {:title "a mail"
+                                                         :description "the only copy left"}})})
+      (insert! db :events {:id 51 :effective_user_id daniel :action "create"
+                           :entity_type "motto" :entity_id 1
+                           :payload (payload {:row {:title "Memento Mori"
+                                                    :description "Remember death"}})})
+      (is (= 0 (:exit (run-script "--user" "daniel" db))))
+      (is (seal/sealed? (get-in (event-payload db 50) [:snapshot :description]))
+          "a deleted message's body is sealed in the log")
+      (is (seal/sealed? (get-in (event-payload db 51) [:row :description])))
+      (is (= "a message body, in the clear" (value db :messages :description "id=1"))
+          "while the table itself stays clear, which is the other half")
+      (is (= "Remember death" (value db :mottos :description "id=1")))
+      (is (= 0 (:exit (run-script "--verify" "--user" "daniel" db))))))
+
+  (testing "**and going forward `--verify` accepts what a keyless writer leaves
+    clear.** The server writes `messages` and `mottos` payloads in the clear
+    because it holds no key and never will. Counted as violations, `--verify` is
+    permanently red within hours of the cutover — useless as the gate 3.4 turns
+    on. This is the walk telling *prose left clear on purpose* from *prose the
+    pass failed to seal*."
+    (let [db (clean-db)]
+      (is (= 0 (:exit (run-script "--user" "daniel" db))))
+      (insert! db :events {:id 60 :effective_user_id daniel :action "update"
+                           :entity_type "message" :entity_id 1
+                           :payload (payload {:field "description"
+                                              :old-value "a message body"
+                                              :new-value "an edited message body"})})
+      (let [{:keys [exit out]} (run-script "--verify" "--user" "daniel" db)]
+        (is (= 0 exit) "still green hours after the cutover")
+        (is (str/includes? out "The invariant holds, in both directions."))
+        (is (str/includes? out "clear-entity") "and it is counted, in its own column"))
+      (testing "**and a later pass seals it, which is the decision and not a
+        contradiction of it.** The rule is *seal the historical log wholesale* —
+        so whenever the pass runs, whatever is in the log at that moment goes
+        under, including a message body the server wrote in the clear an hour
+        ago. What `--verify` accepts is prose left clear; what the pass does is
+        seal what is there. The two are not in tension: the pass is idempotent
+        over runs at one moment, and deliberately not over time, because the log
+        keeps growing and a deleted message's snapshot is worth protecting
+        whenever it arrives."
+        (let [{:keys [exit out]} (run-script "--user" "daniel" db)]
+          (is (= 0 exit))
+          (is (str/includes? out "2 values in 1 rows sealed")
+              "the old-value and the new-value of that one message edit")
+          (is (seal/sealed? (get-in (event-payload db 60) [:new-value]))))
+        (let [{:keys [exit out]} (run-script "--user" "daniel" db)]
+          (is (= 0 exit))
+          (is (str/includes? out "0 values in 0 rows sealed")
+              "and immediately again, nothing is left to do")))))
+
+  (testing "**the control, which is what makes the above mean anything**: an event
+    about a *sealed* table holding clear prose is still a violation, and so is a
+    plaintext body in a sealed table"
+    (let [db (clean-db)]
+      (is (= 0 (:exit (run-script "--user" "daniel" db))))
+      (insert! db :events {:id 61 :effective_user_id daniel :action "update"
+                           :entity_type "task" :entity_id 1
+                           :payload (payload {:field "description" :old-value "was"
+                                              :new-value "is"})})
+      (let [{:keys [exit out]} (run-script "--verify" "--user" "daniel" db)]
+        (is (= 1 exit))
+        (is (str/includes? out "id 61")))))
+
+  (testing "an entity type this vocabulary does not know is a refusal and never a
+    default. Treated as clear by accident it would be prose left readable by the
+    one tool that exists to say it is not; treated as sealed by accident it would
+    stop a cutover for no reason. Neither is a thing to guess at."
+    (let [db (clean-db)]
+      (insert! db :events {:id 62 :effective_user_id daniel :action "create"
+                           :entity_type "sprocket"
+                           :payload (payload {:row {:description "prose of a kind nobody mapped"}})})
+      (let [{:keys [exit err]} (run-script "--verify" "--user" "daniel" db)]
+        (is (= 2 exit))
+        (is (str/includes? err "sprocket"))
+        (is (str/includes? err "entity-type->table")))))
+
+  (testing "and the vocabulary is policed against the inventory at load, the way
+    the other two halves of it are — asserted by breaking it, because a static
+    check that nothing ever breaks is a static check nothing drives"
+    (is (nil? (check-inventory!)) "the vocabulary as it stands satisfies both halves")
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"no entity type maps to"
+         (with-redefs [seal/entity-type->table (dissoc seal/entity-type->table "task")]
+           (check-inventory!)))
+        "a sealed table nothing reaches would have every one of its events judged as
+         if it were about nothing — the quiet failure a tenth sealed column makes")
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"names tables this program does not know"
+         (with-redefs [seal/entity-type->table (assoc seal/entity-type->table "sprocket" :sprockets)]
+           (check-inventory!)))
+        "and a mapping to a table nobody has is a mapping that cannot be acted on")))
 
 (deftest the-tables-that-must-stay-clear-are-asked-about-too
   (testing "**the second direction was *nothing of anybody else's is sealed*, and
