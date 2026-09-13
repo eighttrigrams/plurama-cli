@@ -118,7 +118,15 @@
       title TEXT NOT NULL DEFAULT '', description TEXT DEFAULT '', user_id INTEGER);"
    "\nCREATE TABLE mottos (id INTEGER PRIMARY KEY, title TEXT NOT NULL DEFAULT '',
       description TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL DEFAULT 'both',
-      user_id INTEGER NOT NULL);"))
+      user_id INTEGER NOT NULL);"
+   ;; **A clear table with no `id` column**, which is why `clear-sealed-rows` asks
+   ;; for `rowid`. This is tracker's own shape, copied: `working_on`'s primary key
+   ;; is `user_id`, so a query naming `id` does not return the wrong row, it fails
+   ;; outright. The comment beside that `rowid` argued the case and nothing drove
+   ;; it — every clear table in this fixture had an `id` — so swapping it back for
+   ;; `id` left the suite green.
+   "\nCREATE TABLE working_on (user_id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL,
+      set_on TEXT NOT NULL DEFAULT '2026-01-01');"))
 
 (defn- sql-value [v]
   (cond
@@ -260,6 +268,17 @@
                          :description "Remember death"})
     (insert! db :mottos {:id 2 :user_id antonio :title "Carpe Diem"
                          :description "Seize the day"})
+    ;; **Two rows that exist to be *not* matched**, and both were argued for in
+    ;; comments with nothing driving them. `ENC:V1:` uppercase is why the audit
+    ;; uses GLOB and not LIKE — LIKE is case-insensitive over ASCII and would call
+    ;; this sealed. The event writes *about* the envelope, which is why the payload
+    ;; glob wants a quote before the prefix: in JSON a sealed value always has one
+    ;; and a sentence mentioning it does not.
+    (insert! db :tasks {:id 12 :user_id antonio :title "a near miss, in capitals"
+                        :description "ENC:V1:bm90IHNlYWxlZA=="})
+    (insert! db :events {:id 11 :effective_user_id antonio :action "create" :entity_type "task"
+                         :payload (payload {:row {:title "t"
+                                                  :description "the envelope reads enc:v1: and then base64"}})})
     db))
 
 (defn- clean-db
@@ -571,8 +590,13 @@
       (testing "a clean database has nobody else's prose sealed"
         (let [audit (into {} (for [{:keys [table rows sealed]} (foreign-audit db scope)]
                                [table [rows sealed]]))]
-          (is (= [2 0] (get audit :tasks)) "antonio's row and the ownerless one")
-          (is (= [1 0] (get audit :events)))
+          (is (= [3 0] (get audit :tasks))
+              "antonio's row, the ownerless one, and the uppercase near-miss — and the
+               second number is 0, which is where GLOB earns its keep: LIKE would
+               have counted `ENC:V1:…` as sealed")
+          (is (= [2 0] (get audit :events))
+              "his create, and the one whose prose merely writes about the prefix —
+               which the payload glob's leading quote is what excludes")
           (is (zero? (reduce + (map :sealed (foreign-audit db scope)))))))
 
       (testing "and one that has is named, in a pass and in a verify, whichever
@@ -1285,6 +1309,69 @@
       (is (= 0 (:exit (run-script "--dry-run" "--user" "daniel" db))))
       (is (= 0 (:exit (run-script "-h"))) "including the alias")
       (is (= "a body 🦫" (value db :tasks :description "id=1"))))))
+
+(deftest an-argued-branch-with-nothing-driving-it
+  ;; Three branches whose *reason* was written down and whose behaviour was
+  ;; not. `:4351`'s pattern, and it is a better detector than any probe:
+  ;; **prose explaining why a branch is necessary is exactly where an untested
+  ;; branch hides**, because the explanation satisfies the reader who would
+  ;; otherwise have asked for a test — including the author, the same
+  ;; afternoon. Each of these survived a semantic mutation before it was here.
+
+  (testing "**a skipped write gives back the bucket the value was counted in,
+    and in the unseal direction that bucket can be `:nested`.** The comment
+    said so; nothing checked it, and `(update acc :changed dec)` passed the
+    whole suite.
+
+    Staged with a trigger, which is the honest way to make a row move
+    *underneath* a walk rather than before one: sealing the first row is what
+    hands the second one to antonio, so the second write loses its
+    compare-and-set exactly as a concurrent writer would make it lose."
+    (let [db (with-users! (tmp-db "tracker-seal-walk-moved"))]
+      (insert! db :tasks {:id 1 :user_id daniel :title "one" :description (nested "first")})
+      (insert! db :tasks {:id 2 :user_id daniel :title "two" :description (nested "second")})
+      (sqlite! db (str "CREATE TRIGGER hand_it_over AFTER UPDATE ON tasks"
+                       " WHEN NEW.id = 1 BEGIN"
+                       " UPDATE tasks SET user_id = " antonio " WHERE id = 2;"
+                       " END;"))
+      (let [counts (pass db :pass :unseal)]
+        (is (= 1 (get counts :skipped-moved)) "row 2 lost its compare-and-set")
+        (is (= 1 (get counts :nested))
+            "and the count it is given back from is `:nested`, not `:changed` —
+             two were tallied there and one was undone")
+        (is (nil? (get counts :changed))
+            "nothing was ever counted `:changed` here, so nothing can be taken
+             back out of it"))))
+
+  (testing "**`matchable-paths` asks the regex's own question — a non-empty
+    string — and not `blank-value?`.** A whitespace-only body matches
+    `\"description\":\" \"`, because a space is a character, so it has to be
+    counted as something the regex could have found. Counted as blank instead,
+    the alarm fires over a payload with nothing unwalked in it at all."
+    (let [db (clean-db)]
+      (insert! db :events {:id 90 :effective_user_id daniel :action "create"
+                           :payload (payload {:row {:description " "}})})
+      (is (nil? (get (pass db :pass :seal) :unwalked))
+          "one walked whitespace body, nothing unwalked, and no alarm")
+      (is (= 1 (get (pass db :pass :seal) :blank))
+          "and it is blank, which is the other half of the same rule")))
+
+  (testing "**a clear table with no `id` column is still named.** `working_on`'s
+    primary key is `user_id`, so the audit asks for `rowid` — which is the `id`
+    where there is one and an answer where there is not. Asking for `id` does
+    not fetch the wrong row, it fails the query outright, and every clear table
+    in this fixture had an `id` until now."
+    (let [db (fresh-db)]
+      (insert! db :working_on {:user_id daniel :task_id 1 :set_on "2026-01-01"})
+      (sqlite! db (str "UPDATE working_on SET set_on = "
+                       (@#'walk/literal (sealed "a date, sealed by something"))
+                       " WHERE user_id = " daniel ";"))
+      (let [{:keys [exit out]} (run-script "--verify" "--user" "daniel" db)]
+        (is (= 1 exit) "a violation, not a crash — exit 2 is the query failing")
+        (is (str/includes? out "working_on"))
+        (is (str/includes? out "set_on") "named by the column that carries it")
+        (is (str/includes? out (str "id " daniel))
+            "and by its rowid, which for this table is the user_id")))))
 
 (deftest the-tables-that-must-stay-clear-are-asked-about-too
   (testing "**the second direction was *nothing of anybody else's is sealed*, and
