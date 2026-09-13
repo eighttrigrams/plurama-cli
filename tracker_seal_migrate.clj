@@ -402,7 +402,19 @@
 ;; `tracker-seal/seal-payload` reaches the same way for the same reason.
 
 (defn- inside
-  "What one envelope actually holds: `:unopenable`, `:nested`, or `:prose`.
+  "What one envelope actually holds: `:not-an-envelope`, `:unopenable`, `:nested`,
+  or `:prose`.
+
+  `:not-an-envelope` is asked first and needs no key. `seal/sealed?` is a question
+  about seven characters of prefix and nothing else — which is right, it is the
+  rule four implementations share and it must stay that cheap — so a plaintext
+  body that happens to begin with `enc:v1:` answers yes to it. It was then
+  reported as *sealed under another key, or damaged*, neither of which was true,
+  and the operator was sent to compare a fingerprint that was fine. Nothing here
+  can seal such a value either: `seal-at` hands back anything carrying the prefix,
+  deliberately, so that no client ever writes `enc(enc(…))`. So it is named for
+  what it is, and the row is left for a human — which is the same outcome, reached
+  with the truth rather than with two guesses.
 
   `unseal-at` hands back a value it cannot read exactly as it is — rule 3, so that
   one unreadable column shows as `enc:v1:…` beside everything that reads instead
@@ -414,11 +426,13 @@
   correct client writes one; a client that sealed a ciphertext it had echoed did,
   which is the bug `seal-at`'s bytes-first comparison exists to prevent."
   [k aad v]
-  (let [opened (env/unseal-at k aad v)]
-    (cond
-      (= opened v) :unopenable
-      (seal/sealed? opened) :nested
-      :else :prose)))
+  (if-not (seal/envelope-shaped? v)
+    :not-an-envelope
+    (let [opened (env/unseal-at k aad v)]
+      (cond
+        (= opened v) :unopenable
+        (seal/sealed? opened) :nested
+        :else :prose))))
 
 (defn- json-cell
   "A value read out of a parsed payload, in the shape a value read out of a column
@@ -444,11 +458,16 @@
   number rather than as a body somebody reads six months later.
 
   `:blank` and `:already` are the two ways of doing nothing on purpose;
-  `:unopenable` is a value carrying the prefix that this key does not open, which
-  is the one thing here nobody can fix in passing — it is reported and left
-  exactly as it is. `:nested` is an envelope inside an envelope, which this pass
-  will not try to unwrap in the seal direction. `:odd` is a prose value that is
-  not text at all."
+  `:unopenable` is a value carrying the prefix, shaped like an envelope, that this
+  key does not open — reported and left exactly as it is. `:not-an-envelope` is
+  the value that reads as sealed and is not one: a plaintext body that begins with
+  the prefix, which nothing here can seal and which used to be reported as a
+  foreign or damaged ciphertext. `:nested` is an envelope inside an envelope,
+  which this pass will not try to unwrap in the seal direction. `:odd` is a prose
+  value that is not text at all.
+
+  The last four are the buckets nobody can fix in passing, and each of them is a
+  different row to go and look at."
   [direction k aad {:keys [type value]}]
   (cond
     (= :null type) [:blank nil]
@@ -458,6 +477,7 @@
     (= :seal direction)
     (if (seal/sealed? value)
       [(case (inside k aad value)
+         :not-an-envelope :not-an-envelope
          :unopenable :unopenable
          :nested :nested
          :prose :already)
@@ -474,11 +494,16 @@
       ;; all it was. Unwrapping recursively would be a pass inventing how deep
       ;; somebody else's mistake goes; writing the inner envelope and saying so
       ;; makes progress, exits non-zero, and finishes on the next run.
-      (let [plain (env/unseal-at k aad value)]
-        (cond
-          (= plain value) [:unopenable nil]
-          (seal/sealed? plain) [:nested plain]
-          :else [:changed plain])))))
+      (if-not (seal/envelope-shaped? value)
+        ;; Nothing to open, and nothing to be got back: this is already the
+        ;; plaintext this direction is walking towards. Named rather than
+        ;; unsealed, because every reader in the system will still call it sealed.
+        [:not-an-envelope nil]
+        (let [plain (env/unseal-at k aad value)]
+          (cond
+            (= plain value) [:unopenable nil]
+            (seal/sealed? plain) [:nested plain]
+            :else [:changed plain]))))))
 
 (defn verdict
   "The same walk, deciding nothing and asserting instead. `[bucket violation?]`.
@@ -515,13 +540,17 @@
     (not= :text type) [:odd true]
 
     (= :unseal direction)
-    (if (seal/sealed? value) [:sealed true] [:plain false])
+    (cond
+      (not (seal/sealed? value)) [:plain false]
+      (seal/envelope-shaped? value) [:sealed true]
+      :else [:not-an-envelope true])
 
     (not (seal/sealed? value)) [:plain true]
 
     :else (case (inside k aad value)
             :prose [:sealed false]
             :nested [:nested true]
+            :not-an-envelope [:not-an-envelope true]
             :unopenable [:unopenable true])))
 
 (defn- judge
@@ -853,16 +882,20 @@
   no column here would be counted and never seen, so every one `decide`,
   `verdict` and `judge-payload` can answer appears in exactly one of these lists."
   {[:pass :seal]     [[:changed "sealed"] [:already "already"] [:blank "blank"]
-                      [:no-prose "no-prose"] [:unopenable "unopenable"] [:nested "NESTED"]
+                      [:no-prose "no-prose"] [:unopenable "unopenable"]
+                      [:not-an-envelope "NOT-ENVELOPE"] [:nested "NESTED"]
                       [:odd "odd"] [:unwalked "UNWALKED"] [:skipped-moved "moved"]]
    [:pass :unseal]   [[:changed "unsealed"] [:already "plain"] [:blank "blank"]
-                      [:no-prose "no-prose"] [:unopenable "unopenable"] [:nested "NESTED"]
+                      [:no-prose "no-prose"] [:unopenable "unopenable"]
+                      [:not-an-envelope "NOT-ENVELOPE"] [:nested "NESTED"]
                       [:odd "odd"] [:unwalked "UNWALKED"] [:skipped-moved "moved"]]
    [:verify :seal]   [[:sealed "sealed"] [:plain "PLAINTEXT"] [:blank "blank"] [:null "null"]
-                      [:no-prose "no-prose"] [:unopenable "UNOPENABLE"] [:nested "NESTED"]
+                      [:no-prose "no-prose"] [:unopenable "UNOPENABLE"]
+                      [:not-an-envelope "NOT-ENVELOPE"] [:nested "NESTED"]
                       [:odd "odd"] [:unwalked "UNWALKED"]]
    [:verify :unseal] [[:plain "plain"] [:sealed "SEALED"] [:blank "blank"] [:null "null"]
-                      [:no-prose "no-prose"] [:odd "odd"] [:unwalked "UNWALKED"]]})
+                      [:no-prose "no-prose"] [:not-an-envelope "NOT-ENVELOPE"]
+                      [:odd "odd"] [:unwalked "UNWALKED"]]})
 
 (defn- print-counts [mode direction by-table]
   (let [cols (get headings [(if (= :verify mode) :verify :pass) direction])
@@ -897,7 +930,9 @@
   [total elsewhere in-the-clear-tables]
   (println)
   (println (str "  alarms             "
-                (str/join " · " (for [[k label] [[:unopenable "unopenable"] [:nested "nested"]
+                (str/join " · " (for [[k label] [[:unopenable "unopenable"]
+                                                 [:not-an-envelope "not-envelope"]
+                                                 [:nested "nested"]
                                                  [:odd "odd"] [:unwalked "unwalked"]
                                                  [:skipped-moved "moved"]]]
                                   (str label " " (get total k 0))))))
@@ -907,12 +942,21 @@
   (println (str "                     sealed rows of other users " (count elsewhere)
                 " · sealed rows in clear tables " (count in-the-clear-tables))))
 
-(defn- plural [n word] (str n " " word (when (not= 1 n) "s")))
+(defn- plural
+  "`3 values`, `1 value` — and, given a verb both ways, one that agrees with it.
+
+  The second arity is the review's N4: `1 value carry the prefix` was printed by
+  four of these notes, because the noun was pluralised and the verb was written
+  once. A number this program prints is usually a number somebody is about to
+  decide on, and a sentence that reads as a typo is one less reason to trust it."
+  ([n word] (str n " " word (when (not= 1 n) "s")))
+  ([n word one many] (str (plural n word) " " (if (= 1 n) one many))))
 
 (def ^:private reasons
   {:plain "in the clear, where this user's prose must be sealed"
    :sealed "an envelope, where none may remain"
    :unopenable "carries the prefix and does not open with this key"
+   :not-an-envelope "is not an envelope: a plaintext body that begins with the prefix"
    :nested "an envelope inside an envelope — a reader meets enc:v1: for prose"
    :odd "not text: a BLOB, or a payload that is not JSON"
    :unwalked "holds a description in a payload shape prose-paths does not know"
@@ -1362,6 +1406,7 @@
                 violations (-> (vec (:violations total)) (into elsewhere) (into in-the-clear))
                 moved (:moved total)
                 unopenable (get total :unopenable 0)
+                not-an-envelope (get total :not-an-envelope 0)
                 odd (get total :odd 0)
                 nested (get total :nested 0)
                 unwalked (get total :unwalked 0)
@@ -1379,8 +1424,8 @@
                 ;; freshly written pages in the `-wal` at this moment, and asking
                 ;; now would have every WAL pass report the work it had just done
                 ;; as something left behind — and exit 1 over it.
-                unfinished (+ unopenable odd nested unwalked (count moved) (count elsewhere)
-                              (count in-the-clear) (count strays-before))]
+                unfinished (+ unopenable not-an-envelope odd nested unwalked (count moved)
+                              (count elsewhere) (count in-the-clear) (count strays-before))]
             (print-counts (if (= :arm mode) :verify mode) direction
                           (into {} (for [[t c] by-table]
                                      [t (dissoc c :violations :moved :rows)])))
@@ -1435,19 +1480,34 @@
               (println "  WAL checkpointed into the database file."))
             (when (pos? unopenable)
               (println)
-              (println (str "  " (plural unopenable "value") " carry the prefix and do not open with this key."))
-              (println "  They were left exactly as they are. Either they were sealed under another")
-              (println "  key, or they are damaged — and neither is a thing a pass can fix as it goes.")
-              (println "  Check the fingerprint above against the one in the browser's ⚙ panel."))
+              (println (str "  " (plural unopenable "value" "is" "are")
+                            " an envelope this key does not open."))
+              (println "  The prefix is there and what follows it is the right shape, so this is not a")
+              (println "  body that merely begins with `enc:v1:` — that is counted separately, below.")
+              (println "  They were left exactly as they are: either they were sealed under another key,")
+              (println "  or they are damaged, and neither is a thing a pass can fix as it goes. Check")
+              (println "  the fingerprint above against the one in the browser's ⚙ panel."))
+            (when (pos? not-an-envelope)
+              (println)
+              (println (str "  " (plural not-an-envelope "value" "carries" "carry")
+                            " the prefix and is not an envelope at all."))
+              (println "  What follows `enc:v1:` is not the base64 of a nonce and a tag, so this is a")
+              (println "  plaintext body that begins with the prefix — a note *about* the envelope")
+              (println "  rather than one. Every reader in this system will call it sealed, this pass")
+              (println "  included, and none of them can open it.")
+              (println "  Nothing here can seal it either, and that is deliberate rather than a gap:")
+              (println "  `seal-envelope/seal-at` hands back anything carrying the prefix, whatever is")
+              (println "  stored, so that no client ever writes enc(enc(…)). Edit the row so its body")
+              (println "  does not begin with the prefix, and run this again."))
             (when (pos? odd)
               (println)
-              (println (str "  " (plural odd "value") " are not text: a BLOB in a prose column,"))
+              (println (str "  " (plural odd "value" "is" "are") " not text: a BLOB in a prose column,"))
               (println "  or an event payload that is not JSON. They were left alone — sealing one")
               (println "  would mean deciding it is text, which is a judgement about somebody")
               (println "  else's data that a counting pass has no business making. Look at them."))
             (when (pos? nested)
               (println)
-              (println (str "  " (plural nested "value") " are an envelope inside an envelope."))
+              (println (str "  " (plural nested "value" "is" "are") " an envelope inside an envelope."))
               (println "  No correct client writes one; one that sealed a ciphertext it had echoed")
               (println "  did. A reader meets `enc:v1:…` where the prose should be.")
               (println (if (= :unseal direction)
@@ -1456,7 +1516,7 @@
   none is left.")))
             (when (pos? unwalked)
               (println)
-              (println (str "  " (plural unwalked "event payload") " hold a description somewhere"))
+              (println (str "  " (plural unwalked "event payload" "holds" "hold") " a description somewhere"))
               (println "  `et.tr.seal-rules/prose-paths` does not look — a sixth shape, which means")
               (println "  prose in the clear that this pass walked past. Do not seal by hand: add")
               (println "  the shape there, where the server, the browser and this pass all read it,")

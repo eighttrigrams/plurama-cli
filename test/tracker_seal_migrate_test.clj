@@ -655,7 +655,8 @@
         answered, and *these must all be 0* is answered badly by a column that is
         not there"
         (let [{:keys [out]} (run-script "--dry-run" "--user" "daniel" db)]
-          (is (str/includes? out "unopenable 0 · nested 0 · odd 0 · unwalked 0 · moved 0"))
+          (is (str/includes? out (str "unopenable 0 · not-envelope 0 · nested 0 · odd 0"
+                                      " · unwalked 0 · moved 0")))
           (is (str/includes? out "sealed rows of other users 0"))))
       (is (= 0 (:exit (run-script "--dry-run" "--user" "daniel" db))))
       (is (= "a body" (value db :tasks :description "id=1")) "a dry run writes nothing")
@@ -791,6 +792,94 @@
         (let [{:keys [exit out]} (run-script "--verify" "--inverse" "--user" "daniel" db)]
           (is (= 0 exit))
           (is (str/includes? out "The invariant holds, in both directions.")))))))
+
+(deftest a-body-that-begins-with-the-prefix-is-told-apart-from-an-envelope
+  (let [note (str "enc:v1:<base64(nonce - ciphertext - tag)> is the envelope; noting it"
+                  " down here so I remember the shape.")]
+    (testing "**`sealed?` is a question about seven characters of prefix and nothing
+      else**, which is right — it is the rule three implementations share and it
+      must stay that cheap. The cost is that a plaintext body which happens to
+      begin with `enc:v1:` reads as sealed to every one of them, is left in the
+      clear by the pass, and was reported as *either sealed under another key, or
+      damaged*. Both of those were untrue, the fingerprint was fine, and there was
+      no flag to proceed past it: the cutover could not finish until somebody
+      hand-edited a row in SQL at 1am, which is the one thing this program exists
+      so that nobody has to do.
+
+      It cannot be sealed, and that is deliberate rather than a gap:
+      `seal-envelope/seal-at` hands back anything carrying the prefix, whatever is
+      stored, so that no client ever writes `enc(enc(…))`. So the fix is not to
+      seal it. The fix is to stop saying two things that are not true and say the
+      one that is."
+      (let [db (clean-db)]
+        (insert! db :tasks {:id 90 :user_id daniel :title "a note about the envelope"
+                            :description note})
+        (let [{:keys [exit out]} (run-script "--user" "daniel" db)]
+          (is (= 1 exit)
+              "it still stops the cutover, and must: the body is in the clear, and
+               an armed flag over it makes that row unsaveable")
+          (is (str/includes? out "NOT-ENVELOPE") "its own column, its own count")
+          (is (str/includes? out "not an envelope at all"))
+          (is (str/includes? out "begins with the prefix")
+              "the third cause, named")
+          (is (not (str/includes? out "sealed under another key"))
+              "and the two that are not true are not offered")
+          (is (= note (value db :tasks :description "id=90")) "left exactly as it is"))
+
+        (testing "`--verify` says the same thing, and names the row"
+          (let [{:keys [exit out]} (run-script "--verify" "--user" "daniel" db)]
+            (is (= 1 exit))
+            (is (str/includes? out "tasks"))
+            (is (str/includes? out "id 90"))
+            (is (str/includes? out "is not an envelope"))))
+
+        (testing "and it is on the alarms line whether or not it is zero, like
+          every other number the operator is told to confirm"
+          (is (str/includes? (:out (run-script "--verify" "--user" "daniel" db))
+                             "not-envelope 1")))
+
+        (testing "`--arm` refuses over it, which is the behaviour that was already
+          right — what was wrong was the reason it gave"
+          (is (= 1 (:exit (run-script "--arm" "--user" "daniel" db))))
+          (is (= "0" (flag db "daniel"))))))
+
+    (testing "**the negative control, and it is the one that matters**: an envelope
+      sealed under another key is still reported as one, with the two causes that
+      are now the only two it can have"
+      (let [db (clean-db)]
+        (insert! db :tasks {:id 91 :user_id daniel :title "foreign"
+                            :description (sealed @other-key "sealed under another key")})
+        (let [{:keys [exit out]} (run-script "--user" "daniel" db)]
+          (is (= 1 exit))
+          (is (str/includes? out "unopenable 1"))
+          (is (str/includes? out "sealed under another key"))
+          (is (not (str/includes? out "NOT-ENVELOPE"))))))
+
+    (testing "the question itself, which is about shape and never about a key: what
+      follows the prefix has to be base64, and has to decode to at least a nonce
+      and a tag. Leaning towards *this is an envelope* on every doubtful case,
+      because telling somebody a damaged ciphertext is only prose is the worse of
+      the two mistakes"
+      (is (seal/envelope-shaped? (sealed "a real one")))
+      (is (not (seal/envelope-shaped? note)) "spaces and angle brackets are not base64")
+      (is (not (seal/envelope-shaped? "enc:v1:")) "nothing at all after it")
+      (is (not (seal/envelope-shaped? "enc:v1:abcd")) "base64, and far too short to be one")
+      (is (not (seal/envelope-shaped? "a body")) "no prefix, not this question")
+      (is (not (seal/envelope-shaped? "enc:v0:d2hhdGV2ZXI=")) "the near miss is plaintext")
+      (is (not (seal/envelope-shaped? nil)))
+      (is (seal/envelope-shaped? (str seal/envelope-prefix (apply str (repeat 40 "A"))))
+          "base64 of 30 bytes: shaped like one, and whether it opens is another
+           question and needs the key"))
+
+    (testing "inside a payload too, since that is where 3,659 of the values are"
+      (let [db (clean-db)]
+        (insert! db :events {:id 90 :effective_user_id daniel :action "create"
+                             :payload (payload {:row {:title "t" :description note}})})
+        (let [{:keys [exit out]} (run-script "--user" "daniel" db)]
+          (is (= 1 exit))
+          (is (str/includes? out "NOT-ENVELOPE"))
+          (is (= note (get-in (event-payload db 90) [:row :description]))
+              "untouched, like every other value this pass cannot account for"))))))
 
 (deftest a-flag-this-does-not-know-is-a-refusal-and-never-a-pass
   (testing "**Every deliberate mistake here is already caught and only a typo got

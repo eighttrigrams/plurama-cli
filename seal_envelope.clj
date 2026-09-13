@@ -171,6 +171,37 @@
   [v]
   (boolean (and (string? v) (str/starts-with? v envelope-prefix))))
 
+(defn envelope-shaped?
+  "Whether a value carrying the prefix could be an envelope **at all**: the rest
+  of it is base64, and it decodes to at least a nonce and a tag.
+
+  ## A diagnostic, and deliberately not a rule
+
+  Nothing decides what to write by this. `sealed?` above is still the only
+  question the three rules ask and it is still only about the prefix, in all four
+  implementations, which is what keeps them from disagreeing about a near miss.
+  This answers a question only a *report* has: of the values that carry the prefix
+  and do not open, which ones are ciphertext at all?
+
+  The case is not invented. A body that merely begins with `enc:v1:` reads as
+  sealed to `sealed?`, is left in the clear by a migration pass, and used to be
+  reported by tracker's walker as *sealed under another key, or damaged* — two
+  causes, neither of them true, with no way past it but hand-editing a row in SQL.
+  Somebody who has spent a week writing prose *about* this envelope is one paste
+  away from having one.
+
+  It says nothing about whether a genuinely-shaped ciphertext opens; that needs
+  the key, and `unseal-at` is what asks. And it **leans towards *this is an
+  envelope*** on every doubtful case — a length that is merely plausible, base64
+  that merely parses — because telling somebody that a damaged ciphertext is only
+  prose is the worse of the two mistakes to make about their data."
+  [v]
+  (and (sealed? v)
+       (try
+         (>= (alength ^bytes (b64-decode (subs v (count envelope-prefix))))
+             (+ nonce-length (quot tag-bits 8)))
+         (catch Exception _ false))))
+
 (defn blank-value?
   "The values rule 1 refuses to seal. `nil`, `\"\"`, and whitespace-only — the last
   of those because a server that refuses a blank field with `str/blank?` would be

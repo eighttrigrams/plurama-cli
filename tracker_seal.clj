@@ -76,6 +76,7 @@
 (def generate-key-base64 env/generate-key-base64)
 (def fingerprint env/fingerprint)
 (def sealed? env/sealed?)
+(def envelope-shaped? env/envelope-shaped?)
 (def blank-value? env/blank-value?)
 (def seal-text-with-nonce env/seal-text-with-nonce)
 (def seal-text env/seal-text)
