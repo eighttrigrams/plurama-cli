@@ -1266,12 +1266,24 @@
   this one was green in the box and red on the host, which is the machine the
   walk actually runs on.
 
-  So the whole refusal is this program's own, and the only thing taken from the
-  parser is that it refused at all. argv is the authority on what was typed,
-  because argv is what was typed."
+  So the whole refusal is this program's own, and **it is asked before the parser
+  runs** rather than out of the exception the parser throws. That second part was
+  the remaining version bet, and it is the subtler one: the message was right, but
+  *which* of two equally-correct refusals the operator got was decided by
+  `(:cause (ex-data e))` being `:restrict` — an undocumented shape of somebody
+  else's exception, on a version I have never seen. A red there would have meant
+  *babashka's ex-data changed*, not *a typo got through*. Asked first, the branch
+  is chosen by this program reading the command line, and there is nothing left to
+  be wrong about. `:restrict true` stays on as a backstop, and reaching it now
+  means argv and the parser disagree, which is worth saying out loud.
+
+  It matches the parser by construction where it has to: a bare `--` ends the
+  options, exactly as `parse-args` treats it, and only a dash followed by a letter
+  is a flag — so `-`, `--` and anything after the separator are positional here
+  too."
   [argv]
-  (vec (distinct (for [token argv
-                       :when (str/starts-with? token "-")
+  (vec (distinct (for [token (take-while #(not= "--" %) argv)
+                       :when (re-find #"^-{1,2}[A-Za-z]" token)
                        :let [head (head-of token)]
                        :when (not (known-flag? head))]
                    head))))
@@ -1459,33 +1471,29 @@
         fall-through (str "One it does not know selects no mode, and the mode nothing"
                           " selects is the pass — which writes, and is not reversible"
                           " without the key and a second downtime.")
+        ;; **Asked of argv, before the parser runs.** See `unknown-flags`: doing it
+        ;; afterwards meant the branch that produced this sentence was chosen by
+        ;; the shape of somebody else's exception, on a version nobody here has
+        ;; ever run.
+        unknown (unknown-flags argv)
+        _ (when (seq unknown)
+            (throw (ex-info (str (str/join " and " unknown)
+                                 (if (= 1 (count unknown)) " is not a flag" " are not flags")
+                                 " this program has. " flags-it-has " " fall-through)
+                            {})))
         {:keys [opts args]}
         (try (cli/parse-args argv {:spec cli-spec :aliases cli-aliases :restrict true})
              (catch Exception e
-               (if-not (= :restrict (:cause (ex-data e)))
-                 ;; The parser's other refusals — a missing value, a negation it
-                 ;; will not take — are accurate and are left in its words. They
-                 ;; gain the list of flags, because whatever went wrong the
-                 ;; operator's next move is to retype one. Nothing here or in the
-                 ;; suite reads that half of the sentence.
-                 (throw (if (= :org.babashka/cli (:type (ex-data e)))
-                          (ex-info (str (ex-message e) ". " flags-it-has) {})
-                          e))
-                 ;; **This program's sentence, and the flag as it was typed** —
-                 ;; see `unknown-flags`. Nothing of the parser's wording is
-                 ;; repeated here, so nothing the operator reads, and nothing the
-                 ;; suite asserts, moves with its version.
-                 (let [unknown (unknown-flags argv)]
-                   (throw (ex-info (if (seq unknown)
-                                     (str (str/join " and " unknown)
-                                          (if (= 1 (count unknown))
-                                            " is not a flag" " are not flags")
-                                          " this program has. " flags-it-has " " fall-through)
-                                     ;; argv and the parser disagree about what was
-                                     ;; refused, which is not a thing to guess about.
-                                     (str "this command line was refused by the parser: "
-                                          (ex-message e) ". " flags-it-has))
-                                   {}))))))
+               ;; **The backstop, and reaching it is itself information.** Every
+               ;; flag this program does not have was refused above, off argv, so
+               ;; what is left here is one of the parser's own refusals — a missing
+               ;; value, a negation it will not take — or a disagreement between
+               ;; argv and the parser about what counts as a flag. Those are
+               ;; accurate in its words and are left in them; they gain the list of
+               ;; flags, because whatever went wrong the operator's next move is to
+               ;; retype one. **Nothing here reads the exception's shape**, which
+               ;; is the whole point, and nothing in the suite reads its words.
+               (throw (ex-info (str (or (ex-message e) (str e)) ". " flags-it-has) {}))))
         negated (sort (keep (fn [[k v]] (when (false? v) (typed-as argv k))) opts))]
     (when (seq negated)
       (throw (ex-info (str (str/join " and " negated)

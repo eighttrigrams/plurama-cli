@@ -26,7 +26,8 @@
   walker cannot run without it either, so a suite that went green on a machine
   where the tool does not work would be reporting agreement it never checked —
   the same judgement `seal-vectors.edn` gets next door."
-  (:require [babashka.process :as p]
+  (:require [babashka.cli :as cli]
+            [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
@@ -45,6 +46,7 @@
 (def ^:private sidecars @#'walk/sidecars)
 (def ^:private unknown-flags @#'walk/unknown-flags)
 (def ^:private typed-as @#'walk/typed-as)
+(def ^:private parse! @#'walk/parse!)
 
 (def ^:private repo-root
   "The suite runs from the repo root — `bb test` says so — and the tests that
@@ -1048,7 +1050,18 @@
     protected.
 
     What protects the operator is the exit code, the bytes of the database, and
-    the sentence this program writes itself. Those are what is asserted."
+    the sentence this program writes itself. Those are what is asserted.
+
+    **And a second, subtler version of the same bug, which `:4351` named while
+    fixing one of their own.** Owning the sentence was not enough: for a while the
+    branch that produced it was selected by `(:cause (ex-data e))` being
+    `:restrict` — an undocumented shape of somebody else's exception, on a version
+    nobody here has run. Both of this program's branches refuse and both are
+    correct, so a red there would have meant *babashka's ex-data changed*, not *a
+    typo got through*. The scan is asked of argv **before** the parser now, so the
+    branch is chosen by this program reading the command line. Not a dependency's
+    wording — a dependency deciding which of our own guards speaks, which is the
+    same disease one level in."
     (doseq [flag ["--dryrun" "--dry_run" "-n" "--verfiy" "--unsel" "--am" "--Verify"]]
       (let [db (clean-db)
             before (digest db)
@@ -1073,7 +1086,16 @@
   (testing "**a mode given a value that reads as false selects no mode**, which is
     the same fall-through by another spelling: `--verify false` and `--no-verify`
     both parse, both leave `chosen` empty, and both would run the pass. Every mode
-    here is a switch — it is given or it is not."
+    here is a switch — it is given or it is not.
+
+    **This block does rest on a dependency's behaviour, deliberately.** Reaching
+    the refusal below needs `babashka.cli` to parse these six spellings to
+    `false`, which is its business and not ours. That is the *other* kind of
+    dependency assertion and it is the kind to keep: if a version stopped parsing
+    `--no-verify` that way the run would still be refused and still write nothing
+    — the two assertions that matter here — but the operator would get the
+    parser's sentence instead of ours, which is worse, and a red saying so would
+    be a true one."
     (doseq [args [["--verify" "false"] ["--verify=false"] ["--no-verify"]
                   ["--dry-run" "false"] ["--no-dry-run"] ["--no-unseal"]]]
       (let [db (clean-db)
@@ -1124,6 +1146,14 @@
            that can say what is wrong with it")
       (is (= [] (unknown-flags ["--user" "daniel" "a.db"]))
           "and a value is not a flag, however it is spelled"))
+    (testing "and it ends the options where `parse-args` ends them, because the
+      two now have to agree: this is asked *before* the parser runs, so a token
+      one of them calls a flag and the other calls a filename is a disagreement
+      with nothing left to resolve it"
+      (is (= [] (unknown-flags ["--" "a.db"])) "a bare -- is the separator, not a flag")
+      (is (= [] (unknown-flags ["-" "a.db"])) "and a bare - is a filename's business")
+      (is (= [] (unknown-flags ["--" "--dryrun" "a.db"])) "after it, everything is positional")
+      (is (= ["--dryrun"] (unknown-flags ["--dryrun" "--" "a.db"])) "before it, nothing is"))
     (testing "`typed-as` shows which of the three ways a mode was switched off"
       (is (= "--verify" (typed-as ["--verify" "false"] :verify)))
       (is (= "--no-verify" (typed-as ["--no-verify"] :verify)))
@@ -1131,6 +1161,31 @@
       (is (= "--verify" (typed-as ["--dry-run"] :verify))
           "and falls back to the plain spelling rather than guessing, which would
            mean argv and the parser disagree")))
+
+  (testing "**and the refusal survives the parser being replaced.** This is the
+    check that would have caught the second bug and did not exist to catch it:
+    `--dryrun` is refused off argv *before* `parse-args` runs, so what the parser
+    would have thrown — its wording, its `ex-data`, whether it has any — cannot
+    reach the operator and cannot reach this assertion. Run against the real
+    parser as well, so that the two mutations are a demonstration and not a
+    tautology about a code path nothing else takes."
+    (let [refusal #(try (parse! ["--dryrun" "--user" "daniel" "a.db"])
+                        "no refusal at all"
+                        (catch Exception e (ex-message e)))
+          ours "--dryrun is not a flag this program has"]
+      (is (str/includes? (refusal) ours) "with the real parser")
+      (is (str/includes?
+           (with-redefs [cli/parse-args
+                         (fn [& _] (throw (ex-info "quite different wording"
+                                                   {:cause :something-else})))]
+             (refusal))
+           ours)
+          "with one whose message and ex-data both say something else")
+      (is (str/includes?
+           (with-redefs [cli/parse-args (fn [& _] (throw (Exception. "no ex-data at all")))]
+             (refusal))
+           ours)
+          "and with one that carries no ex-data to read")))
 
   (testing "and the flags it does have still work, which is what makes the above a
     fix rather than a wall"
