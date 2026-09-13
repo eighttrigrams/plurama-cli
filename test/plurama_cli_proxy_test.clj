@@ -551,3 +551,46 @@
       (let [forwarded (-> (->> @(:seen up) (filter #(= :put (:method %))) first :body)
                           (json/parse-string true))]
         (is (= "an inbox body" (:description forwarded)))))))
+
+(deftest a-conversion-carrying-an-explicit-null-is-filled-in-like-an-absent-one
+  ;; R-1's distinction, in the second client. `seal-outgoing` fills a convert's
+  ;; body only where the caller supplied none, and *supplied* is `some?` and not
+  ;; `contains?` — the same question tracker's own guard had to be corrected to
+  ;; ask. A box agent building its request from a variable that can be nil sends
+  ;; `{"description": null}`, which is a key with no body behind it; left alone it
+  ;; reaches a server that reads it as *nothing was sent* and refuses, and the
+  ;; agent's convert is lost for a reason nothing explains.
+  ;;
+  ;; Found undriven by a semantic mutation — `some?` swapped for `contains?`, all
+  ;; 159 tests still green — after `4352` made the point that a throw-mutation
+  ;; only shows a branch is *reached*. The reason was in the docstring and in no
+  ;; assertion.
+  (with-upstream {"/api/messages/7" {:body {:id 7 :description "a paragraph of his own notes"}}
+                  "/api/messages/7/convert-to-task" {:body {:id 88}}}
+    (fn [up]
+      (request up (tracker-keys)
+               {:method :post :uri "/tracker/api/messages/7/convert-to-task"
+                :body (json/generate-string {:description nil})})
+      (let [forwarded (-> (->> @(:seen up) (filter #(= :post (:method %))) first :body)
+                          (json/parse-string true))]
+        (is (tracker-seal/sealed? (:description forwarded))
+            "a null is no body at all, so the message's own prose is fetched and sealed")
+        (is (= "a paragraph of his own notes"
+               (tracker-seal/unseal @tracker-test-key :tasks :description
+                                    (:description forwarded))))))))
+
+(deftest a-conversion-that-carries-its-own-body-is-not-overwritten-by-the-fetch
+  ;; The other side of the same predicate: what the caller *did* send wins, and
+  ;; the upstream message is never consulted for a column already supplied.
+  (with-upstream {"/api/messages/7" {:body {:id 7 :description "the message's own body"}}
+                  "/api/messages/7/convert-to-task" {:body {:id 88}}}
+    (fn [up]
+      (request up (tracker-keys)
+               {:method :post :uri "/tracker/api/messages/7/convert-to-task"
+                :body (json/generate-string {:description "what the agent wrote instead"})})
+      (let [forwarded (-> (->> @(:seen up) (filter #(= :post (:method %))) first :body)
+                          (json/parse-string true))]
+        (is (= "what the agent wrote instead"
+               (tracker-seal/unseal @tracker-test-key :tasks :description
+                                    (:description forwarded)))
+            "the agent's text, not the message's")))))
