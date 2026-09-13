@@ -82,6 +82,14 @@
   bodies are written by three producers that hold no key; a motto's description
   is a second name and not prose. `et.tr.seal-rules/clear-tables` argues both.
 
+  **That one is asked rather than assumed, too**, and for a while it was not.
+  `--verify` reported *nothing of anybody else's is sealed*, which is a different
+  sentence from *nothing that must stay clear is sealed* — and since nothing here
+  walks `messages` or `mottos`, nothing here was looking at them. A sealed motto
+  and a sealed message body sat on a database that called the invariant held. So
+  the clear tables get the same GLOB the foreign audit gets, over every column
+  they have, for every user, in both directions, without reading a value.
+
   **Everything that is not prose.** No title, tag, badge title, scope, date, flag,
   ordering or id is read into an UPDATE, let alone written.
 
@@ -711,6 +719,105 @@
                         " AND (" glob ") ORDER BY id LIMIT 40;")))))
 
 ;; ---------------------------------------------------------------------------
+;; The third direction: the tables that must stay clear.
+;;
+;; `foreign-audit` above asks *is anything of somebody else's sealed*. That is a
+;; different question from *is anything that must stay clear sealed*, and for a
+;; while this program only asked the first — so a sealed `mottos` description and
+;; a sealed `messages` body sat on a database whose `--verify` said, in those
+;; words, that the invariant held in both directions.
+;;
+;; `messages` and `mottos` are in neither `walked` nor `foreign-audit`, because
+;; nothing here touches them; that is exactly why nothing here was asking about
+;; them. Recipe 159 names the shape: **an invariant that holds only for the
+;; columns somebody happens to look at is not one.**
+;;
+;; Like `foreign-audit`, this asks the database rather than the values — a GLOB
+;; against the prefix, no key, no decryption, and not one message body crosses
+;; the sqlite3 boundary. And unlike everything else here it is **not scoped to a
+;; user**: `clear-tables` is permanent and applies to all three humans, so
+;; antonio's sealed message is the same violation as daniel's.
+
+(defn- quoted-identifier
+  "A column name as SQL. Double quotes, doubled inside, because these names come
+  out of `pragma_table_info` rather than out of this file — every one of
+  tracker's is a bare word today, and a walk that assumed that about a schema it
+  reads at run time would be assuming it about somebody else's database."
+  [s]
+  (str \" (str/replace s "\"" "\"\"") \"))
+
+(defn- any-column-sealed
+  "`c1 GLOB 'enc:v1:*' OR c2 GLOB …` over a whole row.
+
+  **Every column, and not the one called `description`.** A clear table is clear
+  in all of it: a subject line, a sender or a motto's scope carrying an envelope
+  is the same accident with the same cause, and picking one column to ask about
+  would rebuild the blind spot this check exists to close — one column lower
+  down."
+  [columns]
+  (str/join " OR " (for [c columns] (str (quoted-identifier c) " GLOB " (sealed-glob)))))
+
+(defn- clear-columns
+  "The clear tables this database actually has, and every column of each:
+  `{table [column …]}`, in one invocation.
+
+  The intersection matters in both directions. `clear-tables` names eighteen
+  tables and a given tracker holds some of them — `items` is not a tracker table
+  at all and the seven `*_categories` join tables came in one at a time — so a
+  walk over the list as written would refuse a database for not having a table it
+  was never supposed to have. Asking `sqlite_master` costs one query and makes
+  the answer about this file.
+
+  `pragma_table_info` as a joinable table-valued function is SQLite ≥ 3.16, which
+  this program already depends on elsewhere (`seal-prose-column?`)."
+  [db]
+  (let [wanted (str/join ", " (map #(literal (name %)) (sort (map name seal/clear-tables))))]
+    (reduce (fn [m line]
+              (let [[table column] (str/split line #"\|" -1)]
+                (update m (keyword table) (fnil conj []) column)))
+            {}
+            (rows db (str "SELECT m.name || '|' || p.name"
+                          " FROM sqlite_master m JOIN pragma_table_info(m.name) p"
+                          " WHERE m.type = 'table' AND m.name IN (" wanted ")"
+                          " ORDER BY m.name, p.cid;")))))
+
+(defn- clear-audit
+  "For every clear table present: how many rows it has, and how many of them carry
+  the envelope prefix anywhere. One invocation for all of them.
+
+  The first number is what turns *and these stay clear* from a claim into
+  something on the screen; the second is a violation in both directions."
+  [db]
+  (let [columns (clear-columns db)]
+    (when (seq columns)
+      (vec (for [line (rows db (str/join "\nUNION ALL\n"
+                                         (for [[t cs] (sort-by key columns)]
+                                           (str "SELECT " (literal (name t)) " || '|' || count(*) || '|' "
+                                                "|| COALESCE(SUM(CASE WHEN " (any-column-sealed cs)
+                                                " THEN 1 ELSE 0 END), 0) FROM " (name t)))))
+                 :let [[table rows-out sealed] (str/split line #"\|" -1)]]
+             {:table (keyword table) :columns (get columns (keyword table))
+              :rows (parse-long rows-out) :sealed (parse-long sealed)})))))
+
+(defn- clear-sealed-rows
+  "The offending rows, asked only of the tables that answered. The row and the
+  column it is in, and nothing else — the operator needs to know which motto, not
+  what it says.
+
+  **`rowid` rather than `id`**, because `working_on` has no `id`: its primary key
+  is `user_id`. Every one of these is an ordinary rowid table, where `rowid` is
+  the `id` when there is one and an answer when there is not."
+  [db {:keys [table columns]}]
+  (for [line (rows db (str "SELECT rowid || '|' || CASE "
+                           (str/join " " (for [c columns]
+                                           (str "WHEN " (quoted-identifier c) " GLOB " (sealed-glob)
+                                                " THEN " (literal c))))
+                           " END FROM " (name table)
+                           " WHERE (" (any-column-sealed columns) ") ORDER BY rowid LIMIT 40;"))
+        :let [[id column] (str/split line #"\|" -1)]]
+    {:table table :id (parse-long id) :column (keyword column) :why :clear-sealed}))
+
+;; ---------------------------------------------------------------------------
 ;; What it prints. The counts are the point: a pass whose output is "done" is a
 ;; pass nobody can check.
 
@@ -760,14 +867,18 @@
   column that is not there: absent and zero look the same only to somebody who
   already knows the rule. One line, always, and it is the line to read before
   deciding to go on."
-  [total elsewhere]
+  [total elsewhere in-the-clear-tables]
   (println)
   (println (str "  alarms             "
                 (str/join " · " (for [[k label] [[:unopenable "unopenable"] [:nested "nested"]
                                                  [:odd "odd"] [:unwalked "unwalked"]
                                                  [:skipped-moved "moved"]]]
-                                  (str label " " (get total k 0))))
-                " · sealed rows of other users " (count elsewhere))))
+                                  (str label " " (get total k 0))))))
+  ;; The two halves of the invariant this pass cannot see from inside its own
+  ;; walk, on their own line because the first one is already as long as a line
+  ;; should be. Both are counts of rows nothing here read.
+  (println (str "                     sealed rows of other users " (count elsewhere)
+                " · sealed rows in clear tables " (count in-the-clear-tables))))
 
 (defn- plural [n word] (str n " " word (when (not= 1 n) "s")))
 
@@ -778,7 +889,8 @@
    :nested "an envelope inside an envelope — a reader meets enc:v1: for prose"
    :odd "not text: a BLOB, or a payload that is not JSON"
    :unwalked "holds a description in a payload shape prose-paths does not know"
-   :foreign-sealed "another user's row, and it carries the envelope prefix"})
+   :foreign-sealed "another user's row, and it carries the envelope prefix"
+   :clear-sealed "a table that stays clear, and it carries the envelope prefix"})
 
 (defn- print-violations [violations]
   (when (seq violations)
@@ -937,8 +1049,9 @@
   (println "              the key and a second downtime.")
   (println "  --unseal    the inverse pass. Same scope, same counts.")
   (println "  --verify    read-only; reports the invariant both ways and exits 1 if it")
-  (println "              is broken — everything of his that must be sealed is, and")
-  (println "              nothing of anybody else's is. With --unseal (or --inverse),")
+  (println "              is broken — everything of his that must be sealed is,")
+  (println "              nothing of anybody else's is, and nothing at all in the")
+  (println "              tables that stay clear. With --unseal (or --inverse),")
   (println "              asserts the inverse: no envelope anywhere.")
   (println "  --dry-run   decide everything and write nothing.")
   (println "  --arm       set users.seal_prose = 1 for him and nobody else. Refuses")
@@ -948,8 +1061,9 @@
   (println "  --disarm    set it back to 0. Do this before --unseal, not after.")
   (println "  --verbose   one line per row written — table, id, columns. Never a value.")
   (println)
-  (println "No other user's rows are read or written, in any mode. Blank values are")
-  (println "never touched. Nothing but prose is read or written.")
+  (println "No other user's rows are read or written, in any mode, and neither is")
+  (println "anything in messages or mottos — they stay clear permanently, and are only")
+  (println "counted. Blank values are never touched. Nothing but prose is written.")
   (println)
   (println "The key comes from TRACKER_SEAL_KEY, TRACKER_SEAL_KEY_FILE, or")
   (println (str "  " seal/key-file " — and unlike every other client here,"))
@@ -958,7 +1072,7 @@
   (println "Back the database up first, and open the backup. This rewrites in place."))
 
 (defn- print-header
-  [{:keys [mode direction db source k user journal strays foreign]}]
+  [{:keys [mode direction db source k user journal strays foreign clear]}]
   (println)
   (println (str "tracker seal walk — "
                 (case mode
@@ -978,6 +1092,13 @@
   (when foreign
     (println (format "  %-10s %s belonging to other users, and not read" "elsewhere"
                      (plural (reduce + (map :rows foreign)) "row"))))
+  ;; Its own line beside `elsewhere`, and phrased the same way, because it is the
+  ;; same kind of answer: a count of rows nothing here read, standing for the half
+  ;; of the invariant the walk cannot see from inside itself.
+  (when (seq clear)
+    (println (format "  %-10s %s in %s that must hold no envelope, and not read" "clear"
+                     (plural (reduce + (map :rows clear)) "row")
+                     (plural (count clear) "table"))))
   ;; **A sidecar with bytes in it is state the `.db` alone does not hold** — see
   ;; `sidecars` for why the length and not the filename is the question. By the
   ;; time this prints, a journal is already gone: `check-database!` opened the
@@ -1014,6 +1135,12 @@
              :when (pos? sealed)
              id (foreign-sealed-ids db ids table)]
          {:table table :id id :column (first (value-columns table)) :why :foreign-sealed})))
+
+(defn- clear-violations [db clear]
+  (vec (for [{:keys [sealed] :as t} clear
+             :when (pos? sealed)
+             row (clear-sealed-rows db t)]
+         row)))
 
 (defn- parse!
   "The command line, refused rather than interpreted. `{:opts … :db …}`.
@@ -1116,9 +1243,10 @@
               ids (:ids user)
               journal (str/trim (str (one db "PRAGMA journal_mode;")))
               walking? (not= :disarm mode)
-              foreign (when walking? (vec (foreign-audit db ids)))]
+              foreign (when walking? (vec (foreign-audit db ids)))
+              clear (when walking? (clear-audit db))]
           (print-header {:mode mode :direction direction :db db :source source :k k :user user
-                         :journal journal :strays strays-before :foreign foreign})
+                         :journal journal :strays strays-before :foreign foreign :clear clear})
           (when (= :disarm mode)
             (let [moved? (set-flag! db (:id user) false)]
               (println)
@@ -1141,7 +1269,8 @@
                                                     :mode (if (= :arm mode) :verify mode)
                                                     :k k :ids ids :verbose? (:verbose opts)})
                 elsewhere (foreign-violations db ids foreign)
-                violations (into (vec (:violations total)) elsewhere)
+                in-the-clear (clear-violations db clear)
+                violations (-> (vec (:violations total)) (into elsewhere) (into in-the-clear))
                 moved (:moved total)
                 unopenable (get total :unopenable 0)
                 odd (get total :odd 0)
@@ -1162,11 +1291,11 @@
                 ;; now would have every WAL pass report the work it had just done
                 ;; as something left behind — and exit 1 over it.
                 unfinished (+ unopenable odd nested unwalked (count moved) (count elsewhere)
-                              (count strays-before))]
+                              (count in-the-clear) (count strays-before))]
             (print-counts (if (= :arm mode) :verify mode) direction
                           (into {} (for [[t c] by-table]
                                      [t (dissoc c :violations :moved :rows)])))
-            (print-alarms total elsewhere)
+            (print-alarms total elsewhere in-the-clear)
             (print-violations violations)
             (when (seq moved)
               (println)
@@ -1250,6 +1379,17 @@
               (println "  them: they are outside the scope in both directions. A keyed client wrote")
               (println "  them, which the server's guard refuses for an unarmed user — so find out")
               (println "  which client, and unseal them with the key that sealed them."))
+            (when (seq in-the-clear)
+              (println)
+              (println (str "  " (plural (count in-the-clear) "row")
+                            " in a table that stays clear carry the"))
+              (println "  envelope prefix. `messages` and `mottos` are not in the inventory and that")
+              (println "  is a decision, not a deferral: message bodies are written by three")
+              (println "  producers that hold no key, and a motto's description is a second name")
+              (println "  rather than prose. Sealed, a motto stops answering the one search in")
+              (println "  tracker that reads a body, and a message body stops opening for anybody")
+              (println "  at all. Nothing here sealed them and nothing here will touch them — find")
+              (println "  the client that did, and unseal them with the key that sealed them."))
             ;; **After the pass, and after the checkpoint.** Nearly unreachable:
             ;; every mode opens the database, which rolls back and deletes a
             ;; journal, and a pass folds a WAL in and truncates it. What could

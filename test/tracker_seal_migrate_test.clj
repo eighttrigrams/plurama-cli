@@ -99,7 +99,22 @@
                          ");")))
    "\nCREATE TABLE events (id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT '2026-01-01 00:00:00',
       action TEXT NOT NULL DEFAULT 'update', entity_type TEXT, entity_id INTEGER,
-      effective_user_id INTEGER, payload TEXT NOT NULL);"))
+      effective_user_id INTEGER, payload TEXT NOT NULL);"
+   ;; **The two tables the model keeps clear on purpose**, written out for the
+   ;; same reason `users` and `events` are: they are not derivable from the
+   ;; inventory, because the inventory is the list they are *not* on. Nothing
+   ;; walks them — that is the point — so what they are here for is the other
+   ;; half of the invariant: an envelope appearing in one of them is a violation
+   ;; that no amount of looking at the sealed columns can see.
+   ;;
+   ;; `mottos` carries a `scope` and `messages` a `sender`, because the audit is
+   ;; every column of them and not the one that happens to be called
+   ;; `description`.
+   "\nCREATE TABLE messages (id INTEGER PRIMARY KEY, sender TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL DEFAULT '', description TEXT DEFAULT '', user_id INTEGER);"
+   "\nCREATE TABLE mottos (id INTEGER PRIMARY KEY, title TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL DEFAULT 'both',
+      user_id INTEGER NOT NULL);"))
 
 (defn- sql-value [v]
   (cond
@@ -224,6 +239,19 @@
     (insert! db :events {:id 10 :effective_user_id daniel :action "update" :entity_type "task"
                          :payload (payload {:field "description" :old-value nil
                                             :new-value "the first body"})})
+
+    ;; The two tables that stay clear, with a body each for him and for antonio.
+    ;; They are in the fixture to be seen *not to move* and to be asked about: a
+    ;; walk that never names them is the half of the invariant nothing was
+    ;; checking.
+    (insert! db :messages {:id 1 :user_id daniel :sender "post@example.org"
+                           :title "a mail" :description "a message body, in the clear"})
+    (insert! db :messages {:id 2 :user_id antonio :sender "post@example.org"
+                           :title "antonio's mail" :description "antonio's message body"})
+    (insert! db :mottos {:id 1 :user_id daniel :title "Memento Mori"
+                         :description "Remember death"})
+    (insert! db :mottos {:id 2 :user_id antonio :title "Carpe Diem"
+                         :description "Seize the day"})
     db))
 
 (defn- clean-db
@@ -237,6 +265,13 @@
     (insert! db :tasks {:id 3 :user_id antonio :title "antonio's" :description "not his to seal"})
     (insert! db :events {:id 1 :effective_user_id daniel :action "create" :entity_type "task"
                          :payload (payload {:row {:title "t" :description "a created body"}})})
+    ;; One body in each of the two clear tables, because *nothing wrong in it* has
+    ;; to include them: a control that holds no message and no motto cannot show
+    ;; that the check which asks about them stays quiet when it should.
+    (insert! db :messages {:id 1 :user_id daniel :sender "post@example.org"
+                           :title "a mail" :description "a message body, in the clear"})
+    (insert! db :mottos {:id 1 :user_id daniel :title "Memento Mori"
+                         :description "Remember death"})
     db))
 
 (defn- pass
@@ -750,6 +785,100 @@
       (is (= 0 (:exit (run-script "--dry-run" "--user" "daniel" db))))
       (is (= 0 (:exit (run-script "-h"))) "including the alias")
       (is (= "a body" (value db :tasks :description "id=1"))))))
+
+(deftest the-tables-that-must-stay-clear-are-asked-about-too
+  (testing "**the second direction was *nothing of anybody else's is sealed*, and
+    the rule is *nothing that must stay clear is sealed*.** `messages` and
+    `mottos` are in neither `walked` nor `foreign-audit`, so nothing anywhere
+    asked about them: a sealed motto description and a sealed message body sat on
+    a database whose `--verify` said, in those words, that the invariant held in
+    both directions.
+
+    What it costs is not hypothetical. A sealed motto makes `db/motto.clj`'s
+    `[:title :description]` search answer *no results* for text plainly on the
+    screen — the one search cost the human refused to pay. A sealed message body
+    breaks `db/message.clj`'s search, breaks the server's title recovery for
+    YouTube and Atom items, and cannot be opened by the three producers that write
+    message bodies and hold no key. None of that produces an error message.
+
+    Recipe 159 states the general form: *an invariant that holds only for the
+    columns somebody happens to look at is not one.*"
+    (let [db (clean-db)]
+      (testing "the control first: a pass over a database with a plain message and
+        a plain motto in it is still a clean pass, and leaves both alone"
+        (is (= 0 (:exit (run-script "--user" "daniel" db))))
+        (is (= 0 (:exit (run-script "--verify" "--user" "daniel" db))))
+        (is (= "a message body, in the clear" (value db :messages :description "id=1")))
+        (is (= "Remember death" (value db :mottos :description "id=1"))))
+
+      (testing "a sealed message body is a violation, and the run says which row"
+        (sqlite! db (str "UPDATE messages SET description = "
+                         (@#'walk/literal (sealed "a message body, sealed")) " WHERE id = 1;"))
+        (let [{:keys [exit out]} (run-script "--verify" "--user" "daniel" db)]
+          (is (= 1 exit))
+          (is (not (str/includes? out "The invariant holds")))
+          (is (str/includes? out "messages"))
+          (is (str/includes? out "id 1"))
+          (is (str/includes? out "description"))
+          (is (not (str/includes? out "a message body, sealed"))
+              "and never reads the value: this is a GLOB against the prefix, no key"))
+        (testing "it stops the cutover, which is the whole point of finding it"
+          (is (= 1 (:exit (run-script "--arm" "--user" "daniel" db))))
+          (is (= "0" (flag db "daniel")) "the flag did not move"))
+        (testing "and it is a violation in the inverse direction too — `messages`
+          must hold no envelope whichever way the walk is going, so the escape
+          hatch cannot report success over one either"
+          (is (= 1 (:exit (run-script "--verify" "--inverse" "--user" "daniel" db)))))
+        (testing "a pass does not quietly fix it: nothing here walks that table in
+          either direction, so the answer is to find the client that wrote it"
+          (is (= 1 (:exit (run-script "--user" "daniel" db))))
+          (is (seal/sealed? (value db :messages :description "id=1"))
+              "left exactly as it was"))))
+
+    (testing "a sealed motto, which is the other one and is the judgement rather
+      than the mechanism: a motto's description is a second name, not prose"
+      (let [db (clean-db)]
+        (sqlite! db (str "UPDATE mottos SET description = "
+                         (@#'walk/literal (sealed "Remember death")) " WHERE id = 1;"))
+        (let [{:keys [exit out]} (run-script "--verify" "--user" "daniel" db)]
+          (is (= 1 exit))
+          (is (str/includes? out "mottos")))))
+
+    (testing "**and it is not scoped to the user being sealed.** `messages` and
+      `mottos` stay clear for everybody, permanently — so antonio's sealed message
+      is the same violation as daniel's, and `foreign-audit` would have called it
+      merely *another user's row* if it had looked at that table at all"
+      (let [db (fresh-db)]
+        (sqlite! db (str "UPDATE messages SET description = "
+                         (@#'walk/literal (sealed "antonio's, sealed")) " WHERE id = 2;"))
+        (let [{:keys [exit out]} (run-script "--verify" "--user" "daniel" db)]
+          (is (= 1 exit))
+          (is (str/includes? out "messages")))))
+
+    (testing "the audit is every column of them, not the one that happens to be
+      called `description` — which is the same rule recipe 159 states and the
+      reason this asks `pragma_table_info` instead of carrying a second inventory"
+      (let [db (clean-db)]
+        (sqlite! db (str "UPDATE messages SET title = "
+                         (@#'walk/literal (sealed "a sealed subject line")) " WHERE id = 1;"))
+        (let [{:keys [exit out]} (run-script "--verify" "--user" "daniel" db)]
+          (is (= 1 exit))
+          (is (str/includes? out "title") "and it names the column that carries it"))))
+
+    (testing "the number is on the alarms line whether or not it is zero, for the
+      reason every other alarm is: absent and zero look the same only to somebody
+      who already knows the rule"
+      (let [db (clean-db)
+            {:keys [out]} (run-script "--dry-run" "--user" "daniel" db)]
+        (is (str/includes? out "sealed rows in clear tables 0"))))
+
+    (testing "a database that has neither table — which is every fixture in this
+      suite that predates them, and any tracker old enough — is not an error: the
+      audit asks about the clear tables this file actually has"
+      (let [db (clean-db)]
+        (sqlite! db "DROP TABLE messages; DROP TABLE mottos;")
+        (is (= 0 (:exit (run-script "--user" "daniel" db))))
+        (is (= 0 (:exit (run-script "--verify" "--user" "daniel" db))))))))
 
 (deftest arming-is-the-last-act-and-refuses-to-be-anything-else
   (testing "`users.seal_prose` is what makes the server refuse a write that would
