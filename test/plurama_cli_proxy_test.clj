@@ -450,3 +450,104 @@
                 :body (json/generate-string {:tags "x"})})
       (is (= 1 (count @(:seen up)))
           "one PUT and no read: the echo rule is only paid for when there is prose"))))
+
+;; ---------------------------------------------------------------------------
+;; The two message conversions, which are the one write in tracker that deletes
+;; its own original.
+;;
+;; A box agent sends `POST /api/messages/7/convert-to-task` with no body at all
+;; — that is what the endpoint has always taken, and the server read the message
+;; and copied its body across. For an armed user the server now refuses that,
+;; because the copy would be readable prose in a sealed column and the message it
+;; came from is gone in the same transaction. The browser answers by sending the
+;; body it is already holding. This process is not holding it, so it has to go
+;; and get it: one read of the row that is about to be destroyed.
+
+(deftest a-message-conversion-carries-the-body-it-is-about-to-destroy
+  (with-upstream {"/api/messages/7" {:body {:id 7 :sender "the poller" :title "an article"
+                                            :description "a paragraph of his own notes"}}
+                  "/api/messages/7/convert-to-task" {:body {:id 88 :title "an article"}}}
+    (fn [up]
+      (let [resp (request up (tracker-keys)
+                          {:method :post :uri "/tracker/api/messages/7/convert-to-task"})
+            forwarded (-> (->> @(:seen up) (filter #(= :post (:method %))) first :body
+                               (#(json/parse-string % true))))]
+        (is (= 200 (:status resp)))
+        (is (tracker-seal/sealed? (:description forwarded))
+            "a convert with no body at all now carries one, sealed")
+        (is (= "a paragraph of his own notes"
+               (tracker-seal/unseal @tracker-test-key :tasks :description
+                                    (:description forwarded)))
+            "and it is the message's own prose, bound as an item body — which is
+             what the new task's column expects, since all nine tables share it")))))
+
+(deftest a-conversion-to-a-resource-keeps-what-the-agent-sent-and-adds-the-body
+  (with-upstream {"/api/messages/7" {:body {:id 7 :description "a resource note body"}}
+                  "/api/messages/7/convert-to-resource" {:body {:id 99}}}
+    (fn [up]
+      (request up (tracker-keys)
+               {:method :post :uri "/tracker/api/messages/7/convert-to-resource"
+                :body (json/generate-string {:link "https://example.com/x"})})
+      (let [forwarded (-> (->> @(:seen up) (filter #(= :post (:method %))) first :body)
+                          (json/parse-string true))]
+        (is (= "https://example.com/x" (:link forwarded))
+            "the link the agent chose is still the link")
+        (is (= "a resource note body"
+               (tracker-seal/unseal @tracker-test-key :resources :description
+                                    (:description forwarded))))))))
+
+(deftest a-conversion-of-a-blank-message-still-forwards-a-blank-body
+  ;; Blank is never sealed, so nothing here is an encoding change — and the
+  ;; request still has to change, because the server tells `""` from *no body was
+  ;; sent* on purpose and refuses the second. A link-only message from the feed
+  ;; worker is the commonest convert in the app.
+  (with-upstream {"/api/messages/7" {:body {:id 7 :title "a link somebody posted"
+                                            :description nil}}
+                  "/api/messages/7/convert-to-task" {:body {:id 88}}}
+    (fn [up]
+      (request up (tracker-keys)
+               {:method :post :uri "/tracker/api/messages/7/convert-to-task"})
+      (let [forwarded (-> (->> @(:seen up) (filter #(= :post (:method %))) first :body)
+                          (json/parse-string true))]
+        (is (= {:description ""} forwarded)
+            "a blank, explicitly — not a null, and not nothing")))))
+
+(deftest a-conversion-whose-message-cannot-be-read-forwards-nothing-of-its-own
+  ;; The direction this fallback points is the whole of its value. Filling in a
+  ;; blank here would convert cleanly and lose the body permanently, with nothing
+  ;; anywhere to say it happened; forwarding what arrived earns the server's
+  ;; refusal, which says exactly that and leaves the message in the inbox.
+  (with-upstream {"/api/messages/7/convert-to-task" {:body {:id 88}}}
+    (fn [up]
+      (request up (tracker-keys)
+               {:method :post :uri "/tracker/api/messages/7/convert-to-task"
+                :body (json/generate-string {})})
+      (let [forwarded (-> (->> @(:seen up) (filter #(= :post (:method %))) first :body)
+                          (json/parse-string true))]
+        (is (= {} forwarded)
+            "the upstream 404'd on the message, so nothing was invented for it")))))
+
+(deftest a-conversion-that-arrives-already-sealed-is-refused-like-any-other-write
+  (let [foreign (tracker-seal/seal @tracker-test-key :tasks :description "sealed in the box" nil)]
+    (with-upstream {"/api/messages/7" {:body {:id 7 :description "the mail body"}}
+                    "/api/messages/7/convert-to-task" {:body {:id 88}}}
+      (fn [up]
+        (let [resp (request up (tracker-keys)
+                            {:method :post :uri "/tracker/api/messages/7/convert-to-task"
+                             :body (json/generate-string {:description foreign})})]
+          (is (= 400 (:status resp)))
+          (is (= "already-sealed" (:reason (body-of resp))))
+          (is (empty? (filter #(= :post (:method %)) @(:seen up)))
+              "the key belongs on one side of this hop, converts included"))))))
+
+(deftest an-ordinary-message-write-is-still-not-a-conversion
+  (with-upstream {"/api/messages/7" {:body {:id 7}}}
+    (fn [up]
+      (request up (tracker-keys)
+               {:method :put :uri "/tracker/api/messages/7"
+                :body (json/generate-string {:description "an inbox body"})})
+      (is (= 1 (count @(:seen up)))
+          "one PUT and no read: a message body is never sealed and nothing is looked up")
+      (let [forwarded (-> (->> @(:seen up) (filter #(= :put (:method %))) first :body)
+                          (json/parse-string true))]
+        (is (= "an inbox body" (:description forwarded)))))))

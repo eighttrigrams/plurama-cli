@@ -304,6 +304,39 @@
           ((:state-of sealer) target (json/parse-string (:body resp) true))))
       (catch Exception _ nil))))
 
+(defn- borrowed-prose
+  "The prose a write has to carry and did not — read out of the row it names, or
+  `nil` when there is no such row or it could not be read.
+
+  Only one kind of write answers a `:body-from` at all: a tracker message
+  conversion, which is the single write in either app that **deletes its own
+  original**. It historically carried no body, because the server read the
+  message and copied it across; a server holds no key, so for an armed user that
+  copy is readable prose in a sealed column with the original gone in the same
+  transaction. The browser answers by sending the body it is already holding.
+  This process is holding nothing, so it goes and gets it.
+
+  **A read that fails fills nothing in.** That is the whole value of the
+  direction: inventing a blank here would convert cleanly and lose the body
+  permanently with nothing anywhere to say so, where forwarding what arrived
+  earns the server's refusal, which says exactly that and leaves the message in
+  the inbox. A blank that the *message itself* carries is different and is filled
+  in as `\"\"`, because the server tells `\"\"` from *no body was sent* on
+  purpose and the link-only message from the feed worker is the commonest
+  convert in the app.
+
+  Like `current-state` it is not logged: it is this process's own bookkeeping,
+  not something the box asked for."
+  [sealer cfg token {:keys [table body-from]}]
+  (when body-from
+    (when-let [row (try
+                     (let [resp (forward cfg token {:method :get :path body-from})]
+                       (when (= 200 (:status resp))
+                         (json/parse-string (:body resp) true)))
+                     (catch Exception _ nil))]
+      (into {} (for [column (get (:sealed-columns sealer) table)]
+                 [column (or (get row column) "")])))))
+
 (defn- foreign-envelopes
   "The prose columns of this write that arrived **already sealed by somebody
   else** — sealed, and not simply the value the row already holds.
@@ -352,15 +385,34 @@
   a whole version ladder to look up columns it is not sending."
   [sealer k cfg token {:keys [method path body]}]
   (let [target (when (#{:post :put} method) ((:write-target sealer) path))]
-    (when (and k target (seq body))
-      (let [parsed (try (json/parse-string body true) (catch Exception _ nil))]
-        (when ((:prose-in sealer) (:table target) parsed)
+    (when (and k target (or (:body-from target) (seq body)))
+      (let [parsed (or (try (json/parse-string body true) (catch Exception _ nil))
+                       (when (:body-from target) {}))
+            ;; What actually goes out, once a write that carries no body of its
+            ;; own has been handed the one it is about to destroy. Anything the
+            ;; caller *did* send wins — `some?` and not `contains?`, which is the
+            ;; same question tracker's own guard asks, because a JSON null is a
+            ;; key with no body behind it and the server reads it as *nothing was
+            ;; sent*. Identical to `parsed` for every write that is not a convert.
+            filled (reduce (fn [m [column v]]
+                             (if (some? (get m column)) m (assoc m column v)))
+                           parsed
+                           (borrowed-prose sealer cfg token target))]
+        (when ((:prose-in sealer) (:table target) filled)
           (let [{:keys [stored] :as state} (current-state sealer cfg token target)]
-            (if-let [foreign (foreign-envelopes sealer (:table target) parsed stored)]
+            (if-let [foreign (foreign-envelopes sealer (:table target) filled stored)]
               {:refused foreign}
-              (when-let [sealed ((:seal-write sealer) k target parsed state)]
+              (let [sealed (or ((:seal-write sealer) k target filled state) filled)]
+                ;; Compared against what **arrived**, so that filling a body in
+                ;; is enough to make the request worth rewriting even when
+                ;; nothing was sealed — a blank message converts to a blank body,
+                ;; and `""` is not the same request as no body at all.
                 (when-not (= sealed parsed)
-                  (let [moved (remove (fn [[c v]] (= v (get parsed c))) sealed)]
+                  ;; The counts are compared against `filled`, though: a column
+                  ;; this process fetched and did not re-encode was not sealed by
+                  ;; it and must not be reported as if it were. `:sealed` and
+                  ;; `:echoed` are the audit line's claim about the *key*.
+                  (let [moved (remove (fn [[c v]] (= v (get filled c))) sealed)]
                     {:body (json/generate-string sealed)
                      :sealed (count (remove (fn [[c v]] (= v (get stored c))) moved))
                      :echoed (count (filter (fn [[c v]] (= v (get stored c))) moved))}))))))))))

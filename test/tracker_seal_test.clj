@@ -428,6 +428,41 @@
          would seal some unrelated task's ciphertext into the new row, so a
          convert is treated as the create it is and echoes nothing")))
 
+(deftest a-message-conversion-is-a-write-target-and-says-where-its-prose-is
+  ;; `write-target` is what a process that sees one request asks instead of
+  ;; keeping an index — `plurama-cli` and the proxy sidecar both. Built on
+  ;; `endpoint-table` alone it answers `nil` for every path under `messages`,
+  ;; which is right for `PUT /api/messages/3` and wrong for the one write under
+  ;; `messages` that lands in a sealed column. Without this the box agent's
+  ;; convert is refused by the server forever, for an armed user, with no client
+  ;; anywhere able to satisfy it.
+  (let [t (seal/write-target "/api/messages/7/convert-to-task")]
+    (is (= :tasks (:table t))
+        "the table it writes into, and not the one its path names")
+    (is (nil? (:id t))
+        "a convert is a create: no row yet, and therefore nothing to echo")
+    (is (nil? (seal/state-path t))
+        "so there is no state read either — and the 7 is the *message's*, so a
+         read of /api/tasks/7 would answer for a row nobody mentioned")
+    (is (= "/api/messages/7" (:body-from t))
+        "the prose it has to carry is over there, in the row it is about to
+         delete, and this is the only thing that can say so"))
+  (testing "to a resource, the same shape"
+    (let [t (seal/write-target "/api/messages/7/convert-to-resource")]
+      (is (= :resources (:table t)))
+      (is (nil? (:id t)))
+      (is (= "/api/messages/7" (:body-from t)))))
+  (testing "and every other path answers exactly what it answered before"
+    (is (nil? (seal/write-target "/api/messages/7"))
+        "an ordinary message write carries no sealed prose and must not gain any")
+    (is (nil? (seal/write-target "/api/messages")))
+    (is (= {:table :tasks :segment "tasks" :id 7} (seal/write-target "/api/tasks/7")))
+    (is (= {:table :categories :segment "people" :id 7} (seal/write-target "/api/people/7"))
+        "the segment is carried because six of them map to :categories")
+    (is (nil? (:body-from (seal/write-target "/api/issues/7/convert-to-task")))
+        "an issue conversion moves ciphertext to ciphertext server-side and has
+         no original to lose — it is not one of the two")))
+
 (deftest an-endpoint-names-the-row-when-it-has-one
   (is (= 123 (seal/endpoint-id "/api/tasks/123")))
   (is (= 9 (seal/endpoint-id "/api/journal-entries/9?detail=full")))
