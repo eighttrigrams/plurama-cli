@@ -772,43 +772,85 @@
   []
   (literal (str "*\"" seal/envelope-prefix "*")))
 
+(defn- outside-scope
+  "The `WHERE` that is everything this pass does not touch: somebody else's rows,
+  and rows with no owner at all.
+
+  `user_id` is nullable on six of the nine tables and `effective_user_id` is
+  nullable on `events`, so an orphan is a real shape and not a hypothetical. It
+  falls on this side of the line — a row nobody owns is not this user's to seal
+  either — which is the deliberate decision recipe 159 asks for and
+  `read-table`'s docstring states. What it also asks for is that they be
+  **counted separately**, which is `:ownerless` below."
+  [table ids]
+  (str (name (owner-column table)) " IS NULL OR "
+       (name (owner-column table)) " NOT IN (" (id-list ids) ")"))
+
+(defn- prefix-glob
+  "*Does any prose column of this row carry the envelope prefix*, as SQL. The
+  audit log is one question about a document; every other table is one per sealed
+  column."
+  [table]
+  (if (= events-table table)
+    (str "payload GLOB " (payload-sealed-glob))
+    (str/join " OR " (for [c (value-columns table)]
+                       (str (name c) " GLOB " (sealed-glob))))))
+
 (defn- foreign-audit
-  "For every walked table: how many rows are **not** this user's, and how many of
-  those carry the envelope prefix. One invocation for all ten.
+  "For every walked table: how many rows are **not** this user's, how many of
+  those have no owner at all, and how many of each carry the envelope prefix. One
+  invocation for all ten.
 
   The first number is the reassurance the playbook asks for — *the pass touches no
-  other user* — as a number rather than as a claim. The second is a violation in
-  both directions: a keyed client sealing antonio's prose is what the server's
-  guard refuses in its other direction, and if one ever got through, the row would
-  be unreadable to the only person entitled to read it."
-  [db ids]
-  (let [scope (fn [table] (str (name (owner-column table)) " IS NULL OR "
-                               (name (owner-column table)) " NOT IN (" (id-list ids) ")"))
-        glob (fn [table] (if (= events-table table)
-                           (str "payload GLOB " (payload-sealed-glob))
-                           (str/join " OR " (for [c (value-columns table)]
-                                              (str (name c) " GLOB " (sealed-glob))))))]
-    (for [line (rows db (str/join "\nUNION ALL\n"
-                                  (for [t walked]
-                                    (str "SELECT " (literal (name t)) " || '|' || count(*) || '|' "
-                                         "|| COALESCE(SUM(CASE WHEN " (glob t) " THEN 1 ELSE 0 END), 0)"
-                                         " FROM " (name t) " WHERE " (scope t)))))
-          :let [[table rows-out sealed] (str/split line #"\|" -1)]]
-      {:table (keyword table) :rows (parse-long rows-out) :sealed (parse-long sealed)})))
+  other user* — as a number rather than as a claim.
 
-(defn- foreign-sealed-ids
-  "The ids of the offending rows, asked only when there are any. Ids, and nothing
-  else: naming a row is what the operator needs, and its body is not."
+  **The second is the review's S7.** The scope has always been *IS NULL OR NOT IN
+  (…)*, which is right, but the header reported the two together as *rows
+  belonging to other users*, and that sentence is not true of an orphan. Recipe
+  159: *Rows orphaned by a missing foreign key exist too… Decide deliberately
+  which side they fall on, count them separately, and say why in the code.* The
+  side and the reason were already in the code; the count was missing, so an
+  operator could not tell from the output whether the file had any. On the dev
+  copy 16 of 853 are `events` with a NULL `effective_user_id` and one of them
+  holds a real body.
+
+  The sealed counts are a violation in both directions: a keyed client sealing
+  antonio's prose is what the server's guard refuses in its other direction, and
+  if one ever got through, the row would be unreadable to the only person
+  entitled to read it. An orphan carrying the prefix is the same violation with a
+  different thing to go and look for, which is why the two are told apart."
+  [db ids]
+  (for [line (rows db (str/join
+                       "\nUNION ALL\n"
+                       (for [t walked
+                             :let [owner (name (owner-column t))
+                                   glob (prefix-glob t)]]
+                         (str "SELECT " (literal (name t)) " || '|' || count(*)"
+                              " || '|' || COALESCE(SUM(CASE WHEN " owner " IS NULL"
+                              " THEN 1 ELSE 0 END), 0)"
+                              " || '|' || COALESCE(SUM(CASE WHEN " glob " THEN 1 ELSE 0 END), 0)"
+                              " FROM " (name t) " WHERE " (outside-scope t ids)))))
+        :let [[table rows-out ownerless sealed] (str/split line #"\|" -1)]]
+    {:table (keyword table) :rows (parse-long rows-out)
+     :ownerless (parse-long ownerless) :sealed (parse-long sealed)}))
+
+(defn- foreign-sealed-rows
+  "The offending rows, asked only of the tables that answered — and whether each
+  of them has an owner. Ids and that one flag: naming a row is what the operator
+  needs, and its body is not.
+
+  The flag is what keeps the violation line honest. *Another user's row* sends
+  somebody looking for a client acting for antonio; *a row with no owner* sends
+  them somewhere else entirely, and being sent after a user who does not exist is
+  a slow way to find that out."
   [db ids table]
-  (let [glob (if (= events-table table)
-               (str "payload GLOB " (payload-sealed-glob))
-               (str/join " OR " (for [c (value-columns table)]
-                                  (str (name c) " GLOB " (sealed-glob)))))]
-    (keep parse-long
-          (rows db (str "SELECT id FROM " (name table)
-                        " WHERE (" (name (owner-column table)) " IS NULL OR "
-                        (name (owner-column table)) " NOT IN (" (id-list ids) "))"
-                        " AND (" glob ") ORDER BY id LIMIT 40;")))))
+  (let [owner (name (owner-column table))]
+    (for [line (rows db (str "SELECT id || '|' || (" owner " IS NULL) FROM " (name table)
+                             " WHERE (" (outside-scope table ids) ")"
+                             " AND (" (prefix-glob table) ") ORDER BY id LIMIT 40;"))
+          :let [[id ownerless] (str/split line #"\|" -1)]
+          :when (parse-long id)]
+      {:id (parse-long id) :ownerless? (= "1" ownerless)})))
 
 ;; ---------------------------------------------------------------------------
 ;; The third direction: the tables that must stay clear.
@@ -997,6 +1039,7 @@
    :odd "not text: a BLOB, or a payload that is not JSON"
    :unwalked "holds a description in a payload shape prose-paths does not know"
    :foreign-sealed "another user's row, and it carries the envelope prefix"
+   :ownerless-sealed "a row with no owner at all, and it carries the envelope prefix"
    :clear-sealed "a table that stays clear, and it carries the envelope prefix"})
 
 (defn- print-violations [violations]
@@ -1251,9 +1294,19 @@
                      :absent (str "no users.seal_prose column here; migration"
                                   " 074-add-seal-prose has not run against this file"))))
   (println (format "  %-10s %s" "journal" journal))
+  ;; **The orphans are counted on their own**, and not folded into *belonging to
+  ;; other users*, which is a sentence that is not true of them. They fall on the
+  ;; same side of the line — a row nobody owns is not this user's to seal either —
+  ;; and the breakdown is what lets the operator confirm on the day that the
+  ;; second number is what he expects, rather than take somebody's reasoning for
+  ;; it. Printed whether or not it is zero, for the reason `print-alarms` gives.
   (when foreign
-    (println (format "  %-10s %s belonging to other users, and not read" "elsewhere"
-                     (plural (reduce + (map :rows foreign)) "row"))))
+    (let [total (reduce + (map :rows foreign))
+          ownerless (reduce + (map :ownerless foreign))]
+      (println (format "  %-10s %s not this user's, and not read" "elsewhere"
+                       (plural total "row" "is" "are")))
+      (println (format "  %-10s %s another user's, %s with no owner at all — the same side"
+                       "" (- total ownerless) ownerless))))
   ;; Its own line beside `elsewhere`, and phrased the same way, because it is the
   ;; same kind of answer: a count of rows nothing here read, standing for the half
   ;; of the invariant the walk cannot see from inside itself.
@@ -1295,8 +1348,9 @@
 (defn- foreign-violations [db ids foreign]
   (vec (for [{:keys [table sealed]} foreign
              :when (pos? sealed)
-             id (foreign-sealed-ids db ids table)]
-         {:table table :id id :column (first (value-columns table)) :why :foreign-sealed})))
+             {:keys [id ownerless?]} (foreign-sealed-rows db ids table)]
+         {:table table :id id :column (first (value-columns table))
+          :why (if ownerless? :ownerless-sealed :foreign-sealed)})))
 
 (defn- clear-violations [db clear]
   (vec (for [{:keys [sealed] :as t} clear
@@ -1558,12 +1612,18 @@
               (println "  the shape there, where the server, the browser and this pass all read it,")
               (println "  and run again.")) 
             (when (seq elsewhere)
-              (println)
-              (println (str "  " (plural (count elsewhere) "row") " belonging to another user carry"))
-              (println "  the envelope prefix. Nothing here sealed them and nothing here will touch")
-              (println "  them: they are outside the scope in both directions. A keyed client wrote")
-              (println "  them, which the server's guard refuses for an unarmed user — so find out")
-              (println "  which client, and unseal them with the key that sealed them."))
+              (let [orphans (count (filter #(= :ownerless-sealed (:why %)) elsewhere))]
+                (println)
+                (println (str "  " (plural (count elsewhere) "row" "carries" "carry")
+                              " the envelope prefix and is not this user's."))
+                (println "  Nothing here sealed them and nothing here will touch them: they are outside")
+                (println "  the scope in both directions. A keyed client wrote them, which the server's")
+                (println "  guard refuses for an unarmed user — so find out which client, and unseal")
+                (println "  them with the key that sealed them.")
+                (when (pos? orphans)
+                  (println (str "  " (plural orphans "of them" "has" "have")
+                                " no owner at all, so there is no user to look for:"))
+                  (println "  look for what wrote a row without one."))))
             (when (seq in-the-clear)
               (println)
               (println (str "  " (plural (count in-the-clear) "row")

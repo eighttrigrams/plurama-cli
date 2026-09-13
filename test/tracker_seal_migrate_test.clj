@@ -725,7 +725,7 @@
                        " WHERE id = 3;"))
       (let [{:keys [exit out]} (run-script "--user" "daniel" db)]
         (is (= 1 exit))
-        (is (str/includes? out "belonging to another user"))
+        (is (str/includes? out "another user's row"))
         (is (str/includes? out "tasks"))
         (is (not (str/includes? out "antonio's, sealed")) "the value is never printed"))))
 
@@ -942,6 +942,63 @@
                            :payload (payload {:field "description" :old-value ""
                                               :new-value "the first body"})})
       (is (nil? (get (pass db :pass :seal) :unwalked))))))
+
+(deftest rows-with-no-owner-are-counted-as-nobodys-and-not-as-somebody-elses
+  (testing "**`user_id` is nullable on six of the nine tables and on `events`**, so
+    a row with no owner at all is a real shape. `foreign-audit`'s scope is *IS
+    NULL OR NOT IN (…)* — which is the right scope, since a row nobody owns is not
+    this user's to seal either — but the header reported the two together as
+    *rows belonging to other users*, which is a sentence that is not true of the
+    orphans.
+
+    Recipe 159 asks for exactly this to be separated: *Rows orphaned by a missing
+    foreign key exist too… Decide deliberately which side they fall on, count them
+    separately, and say why in the code.* The side was decided and said in
+    `read-table`'s docstring; the count was the half that was missing, so an
+    operator could not tell from the output whether the file had any. On the dev
+    copy 16 of the 853 are `events` with a NULL `effective_user_id`, and one of
+    them holds a real body."
+    (let [db (fresh-db)
+          {:keys [out]} (run-script "--dry-run" "--user" "daniel" db)]
+      (is (str/includes? out "with no owner at all"))
+      (is (str/includes? out "1 with no owner at all")
+          "the fixture's one ownerless task, counted on its own")
+      (is (str/includes? out "elsewhere"))))
+
+  (testing "and it is printed whether or not it is zero, for the reason every other
+    number on this screen is: absent and zero look the same only to somebody who
+    already knows the rule"
+    (let [db (clean-db)
+          {:keys [out]} (run-script "--dry-run" "--user" "daniel" db)]
+      (is (str/includes? out "0 with no owner at all"))))
+
+  (testing "an ownerless row carrying the envelope prefix is still a violation —
+    the side it falls on has not moved — but it is named for what it is, so that
+    the operator looking for the client that wrote it is not sent after a user who
+    does not exist"
+    (let [db (fresh-db)]
+      (sqlite! db (str "UPDATE tasks SET description = "
+                       (@#'walk/literal (sealed "an orphan, sealed")) " WHERE id = 10;"))
+      (let [{:keys [exit out]} (run-script "--verify" "--user" "daniel" db)]
+        (is (= 1 exit))
+        (is (str/includes? out "id 10"))
+        (is (str/includes? out "no owner"))
+        (is (not (str/includes? out "an orphan, sealed")) "and never the value"))
+      (testing "while another user's sealed row still reads as another user's"
+        (sqlite! db (str "UPDATE tasks SET description = "
+                         (@#'walk/literal (sealed "antonio's, sealed")) " WHERE id = 9;"))
+        (let [{:keys [out]} (run-script "--verify" "--user" "daniel" db)]
+          (is (str/includes? out "another user's row"))
+          (is (str/includes? out "no owner"))))))
+
+  (testing "the counts themselves, out of `foreign-audit` rather than off the
+    screen — one ownerless task in the fixture, and nothing sealed anywhere"
+    (let [db (fresh-db)
+          by-table (into {} (for [{:keys [table] :as t} (foreign-audit db scope)] [table t]))]
+      (is (= 1 (:ownerless (get by-table :tasks))))
+      (is (= 0 (:ownerless (get by-table :events))))
+      (is (= 0 (reduce + (map :sealed (vals by-table)))))
+      (is (= 1 (reduce + (map :ownerless (vals by-table))))))))
 
 (deftest a-flag-this-does-not-know-is-a-refusal-and-never-a-pass
   (testing "**Every deliberate mistake here is already caught and only a typo got
