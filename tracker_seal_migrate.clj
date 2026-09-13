@@ -638,26 +638,25 @@
   payload holding a description in a shape `prose-paths` does not know — prose
   this pass went past, which it went past going either way."
   [ctx {:keys [type value]}]
-  (let [direction (:direction ctx)]
-    (cond
-      (= :null type) {:entries [{:bucket :blank}]}
-      (not= :text type) {:entries [{:bucket :odd :violation? true}]}
-      :else
-      (let [payload (parse-payload value)]
-        (if (= unparseable payload)
-          {:entries [{:bucket :odd :violation? true}]}
-          (let [paths (seal/prose-paths payload)
-                judged (for [[path aad] paths]
-                         (assoc (judge ctx aad (json-cell (get-in payload path))) :path path))
-                sealed (reduce (fn [p {:keys [path value]}]
-                                 (if (some? value) (assoc-in p path value) p))
-                               payload judged)
-                unwalked? (> (count (re-seq loose-description value))
-                             (matchable-paths payload paths))]
-            {:entries (cond-> (vec judged)
-                        (empty? judged) (conj {:bucket :no-prose})
-                        unwalked? (conj {:bucket :unwalked :violation? true}))
-             :value (when (some :value judged) (json/generate-string sealed))}))))))
+  (cond
+    (= :null type) {:entries [{:bucket :blank}]}
+    (not= :text type) {:entries [{:bucket :odd :violation? true}]}
+    :else
+    (let [payload (parse-payload value)]
+      (if (= unparseable payload)
+        {:entries [{:bucket :odd :violation? true}]}
+        (let [paths (seal/prose-paths payload)
+              judged (for [[path aad] paths]
+                       (assoc (judge ctx aad (json-cell (get-in payload path))) :path path))
+              sealed (reduce (fn [p {:keys [path value]}]
+                               (if (some? value) (assoc-in p path value) p))
+                             payload judged)
+              unwalked? (> (count (re-seq loose-description value))
+                           (matchable-paths payload paths))]
+          {:entries (cond-> (vec judged)
+                      (empty? judged) (conj {:bucket :no-prose})
+                      unwalked? (conj {:bucket :unwalked :violation? true}))
+           :value (when (some :value judged) (json/generate-string sealed))})))))
 
 (defn- judge-row
   "One row of any walked table: `{:entries […] :changed {column → new value}}`.
