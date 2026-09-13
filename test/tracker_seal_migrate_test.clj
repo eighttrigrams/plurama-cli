@@ -306,6 +306,24 @@
                        "UPDATE events SET payload = '';"))
     (content copy)))
 
+(defn- digest
+  "SHA-256 of the database **file**, as hex.
+
+  For the assertions that say *this run wrote nothing*. A `SELECT` on one column
+  of one row says that about the part of the file a wrong answer is least likely
+  to be in; a checksum says it about all of it — the nine tables, the audit log,
+  the users table, the flag, the page layout and the free list.
+
+  It is only honest where nothing has opened the database between the two
+  readings, and for the refusals below nothing has: they are raised before
+  `check-database!`, so there is no journal to roll back, no WAL to fold in and no
+  connection to close. Where a run *does* open the file, `content` and `skeleton`
+  above are the right comparisons and this one is not."
+  [db]
+  (let [bytes (java.nio.file.Files/readAllBytes (.toPath (java.io.File. ^String db)))]
+    (str/join (map #(format "%02x" (bit-and % 0xff))
+                   (.digest (java.security.MessageDigest/getInstance "SHA-256") bytes)))))
+
 (defn- raw
   "One column of one row as `typeof:hex`, which is the only way to read a blank
   without a helper eating it: `rows` drops empty lines, and empty is a value here."
@@ -1010,14 +1028,39 @@
     leave alone.
 
     So an unknown option is a refusal, before the key is loaded and before the
-    database is opened."
+    database is opened.
+
+    **What this asserts, and what it deliberately does not.** It used to check
+    that the refusal contained the flag *as typed*, which is not this program's
+    sentence — `babashka.cli` writes that half, and it writes it differently
+    between neighbouring versions:
+
+        bb 1.13.220 (this box) : Unknown option: --dryrun
+        bb 1.12.217 (the host) : Unknown option: :dryrun
+
+    so the suite was green here and red on the machine the walker actually runs
+    on. That is the third time in a day; the first was the WAL sidecar. **The
+    host is the machine that matters** — the key is host-side by design, so this
+    is developed here and used there — and a check that cannot survive the
+    neighbouring version of a dependency was never checking the thing it
+    protected.
+
+    What protects the operator is the exit code, the bytes of the database, and
+    the sentence this program writes itself. Those are what is asserted."
     (doseq [flag ["--dryrun" "--dry_run" "-n" "--verfiy" "--unsel" "--am" "--Verify"]]
       (let [db (clean-db)
+            before (digest db)
             {:keys [exit err]} (run-script flag "--user" "daniel" db)]
         (is (= 2 exit) (str flag " is not a flag this program has"))
-        (is (str/includes? err flag) (str "and the refusal names " flag))
-        (is (= "a body" (value db :tasks :description "id=1"))
-            (str flag " wrote nothing")))))
+        (is (= before (digest db))
+            (str flag " left the file byte-identical — which is the whole finding,"
+                 " and is not the same claim as one column of one row being unchanged"))
+        (is (str/includes? err "selects no mode, and the mode nothing selects is the pass")
+            (str "and says what the fall-through would have been, for " flag))
+        (is (str/includes? err "not reversible without the key and a second downtime")
+            "which is why that fall-through is the one worth refusing")
+        (is (str/includes? err "--dry-run")
+            "and lists the flags that do exist, which is what the operator needs next"))))
 
   (testing "**a mode given a value that reads as false selects no mode**, which is
     the same fall-through by another spelling: `--verify false` and `--no-verify`
@@ -1026,22 +1069,27 @@
     (doseq [args [["--verify" "false"] ["--verify=false"] ["--no-verify"]
                   ["--dry-run" "false"] ["--no-dry-run"] ["--no-unseal"]]]
       (let [db (clean-db)
+            before (digest db)
             {:keys [exit err]} (apply run-script (concat args ["--user" "daniel" db]))]
         (is (= 2 exit) (str (pr-str args) " is a mode that was not asked for"))
-        (is (str/includes? err "switch") (str "and says why: " (pr-str args)))
-        (is (= "a body" (value db :tasks :description "id=1"))
-            (str (pr-str args) " wrote nothing")))))
+        (is (str/includes? err "Every flag here is a switch")
+            (str "and says why, in this program's words: " (pr-str args)))
+        (is (= before (digest db)) (str (pr-str args) " left the file byte-identical")))))
 
   (testing "**a second database on the command line is a refusal too.** It was
     dropped in silence, so `--user daniel A.db B.db` sealed `A.db`, said nothing
     about `B.db`, and looked exactly like a run that had done both."
     (let [a (clean-db)
           b (clean-db)
+          before-a (digest a)
+          before-b (digest b)
           {:keys [exit err]} (run-script "--user" "daniel" a b)]
       (is (= 2 exit))
-      (is (str/includes? err b) "the refusal names the one it would have ignored")
-      (is (= "a body" (value a :tasks :description "id=1")) "and neither was written")
-      (is (= "a body" (value b :tasks :description "id=1")))))
+      (is (str/includes? err "one database at a time")
+          "this program's sentence, not the parser's")
+      (is (str/includes? err b) "and it names the one that would have been ignored")
+      (is (= before-a (digest a)) "and neither file was written")
+      (is (= before-b (digest b)))))
 
   (testing "and the flags it does have still work, which is what makes the above a
     fix rather than a wall"
