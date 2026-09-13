@@ -1229,6 +1229,66 @@
    :verbose {:desc "Name every row written, and the columns. Never a value." :coerce :boolean}
    :help {:coerce :boolean}})
 
+(def ^:private cli-aliases
+  "The short spellings. A def rather than a literal at the call site, because
+  `known-flag?` below has to agree with `parse-args` about what `-h` is, and two
+  places that have to agree are one place."
+  {:h :help})
+
+(defn- known-flag?
+  "Whether `token` is a flag this program has, in any of its spellings: `--name`,
+  its `--no-name` negation, and the short aliases."
+  [token]
+  (contains? (into (set (map #(str "-" (name %)) (keys cli-aliases)))
+                   (mapcat (fn [k] [(str "--" (name k)) (str "--no-" (name k))])
+                           (keys cli-spec)))
+             token))
+
+(defn- head-of
+  "One argv token without its `=value`, which is the part that names a flag."
+  [token]
+  (first (str/split token #"=" 2)))
+
+(defn- unknown-flags
+  "The tokens in `argv` this program has no flag for — **as the operator typed
+  them**, read off the command line rather than out of the exception.
+
+  That is not a detail. `babashka.cli` writes the flag into its own message and
+  renders it differently between neighbouring versions:
+
+      bb 1.13.220 : Unknown option: --dryrun
+      bb 1.12.217 : Unknown option: :dryrun
+
+  `:dryrun` is a poor thing to read at one in the morning — it is not what
+  anybody typed, and it invites the thought that the program mangled something.
+  Worse, a sentence that changes shape with a dependency's patch version is a
+  sentence neither the operator nor a test can rely on, and a test that rested on
+  this one was green in the box and red on the host, which is the machine the
+  walk actually runs on.
+
+  So the whole refusal is this program's own, and the only thing taken from the
+  parser is that it refused at all. argv is the authority on what was typed,
+  because argv is what was typed."
+  [argv]
+  (vec (distinct (for [token argv
+                       :when (str/starts-with? token "-")
+                       :let [head (head-of token)]
+                       :when (not (known-flag? head))]
+                   head))))
+
+(defn- typed-as
+  "The argv token that carried this option, as it was typed: `--verify`,
+  `--no-verify` or `--verify=false` are three different things to have written
+  and the operator should be shown the one they wrote. Falls back to the plain
+  spelling if the token cannot be found, which would mean argv and the parser
+  disagree and is not a thing to guess about."
+  [argv k]
+  (let [nm (name k)]
+    (or (first (for [token argv
+                     :when (contains? #{(str "--" nm) (str "--no-" nm)} (head-of token))]
+                 token))
+        (str "--" nm))))
+
 (defn- usage []
   (println "Usage: bb tracker_seal_migrate.clj --user NAME [--unseal] [--verify] [--dry-run]")
   (println "                                   [--arm] [--disarm] [--verbose] DATABASE")
@@ -1394,20 +1454,41 @@
   Nothing here loads a key or opens a file, and that is deliberate: an argument
   is wrong before either of those is anybody's business."
   [argv]
-  (let [{:keys [opts args]}
-        (try (cli/parse-args argv {:spec cli-spec :aliases {:h :help} :restrict true})
+  (let [flags-it-has (str "The flags this program has are "
+                          (str/join ", " (sort (map #(str "--" (name %)) (keys cli-spec)))) ".")
+        fall-through (str "One it does not know selects no mode, and the mode nothing"
+                          " selects is the pass — which writes, and is not reversible"
+                          " without the key and a second downtime.")
+        {:keys [opts args]}
+        (try (cli/parse-args argv {:spec cli-spec :aliases cli-aliases :restrict true})
              (catch Exception e
                (if-not (= :restrict (:cause (ex-data e)))
-                 (throw e)
-                 (throw (ex-info (str (ex-message e) ". The flags this program has are "
-                                      (str/join ", " (sort (map #(str "--" (name %)) (keys cli-spec))))
-                                      ". One it does not know selects no mode, and the mode"
-                                      " nothing selects is the pass — which writes, and is not"
-                                      " reversible without the key and a second downtime.")
-                                 {})))))
-        negated (sort (keep (fn [[k v]] (when (false? v) (name k))) opts))]
+                 ;; The parser's other refusals — a missing value, a negation it
+                 ;; will not take — are accurate and are left in its words. They
+                 ;; gain the list of flags, because whatever went wrong the
+                 ;; operator's next move is to retype one. Nothing here or in the
+                 ;; suite reads that half of the sentence.
+                 (throw (if (= :org.babashka/cli (:type (ex-data e)))
+                          (ex-info (str (ex-message e) ". " flags-it-has) {})
+                          e))
+                 ;; **This program's sentence, and the flag as it was typed** —
+                 ;; see `unknown-flags`. Nothing of the parser's wording is
+                 ;; repeated here, so nothing the operator reads, and nothing the
+                 ;; suite asserts, moves with its version.
+                 (let [unknown (unknown-flags argv)]
+                   (throw (ex-info (if (seq unknown)
+                                     (str (str/join " and " unknown)
+                                          (if (= 1 (count unknown))
+                                            " is not a flag" " are not flags")
+                                          " this program has. " flags-it-has " " fall-through)
+                                     ;; argv and the parser disagree about what was
+                                     ;; refused, which is not a thing to guess about.
+                                     (str "this command line was refused by the parser: "
+                                          (ex-message e) ". " flags-it-has))
+                                   {}))))))
+        negated (sort (keep (fn [[k v]] (when (false? v) (typed-as argv k))) opts))]
     (when (seq negated)
-      (throw (ex-info (str (str/join " and " (map #(str "--" %) negated))
+      (throw (ex-info (str (str/join " and " negated)
                            " read as false. Every flag here is a switch: it is given or it is"
                            " not, and there is no third answer to act on. One that parses to"
                            " false selects no mode, and the mode nothing selects is the pass"

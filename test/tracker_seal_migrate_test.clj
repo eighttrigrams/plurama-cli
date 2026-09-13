@@ -43,6 +43,8 @@
 (def ^:private tables @#'walk/tables)
 (def ^:private walked @#'walk/walked)
 (def ^:private sidecars @#'walk/sidecars)
+(def ^:private unknown-flags @#'walk/unknown-flags)
+(def ^:private typed-as @#'walk/typed-as)
 
 (def ^:private repo-root
   "The suite runs from the repo root — `bb test` says so — and the tests that
@@ -1060,7 +1062,13 @@
         (is (str/includes? err "not reversible without the key and a second downtime")
             "which is why that fall-through is the one worth refusing")
         (is (str/includes? err "--dry-run")
-            "and lists the flags that do exist, which is what the operator needs next"))))
+            "and lists the flags that do exist, which is what the operator needs next")
+        ;; **This one is legitimate now and was not before.** The flag as typed is
+        ;; printed by `unknown-flags`, off argv, rather than echoed out of the
+        ;; parser's message — so it is this program's output and cannot move with
+        ;; a dependency's version. Asserting it is asserting our own behaviour.
+        (is (str/includes? err (str flag " is not a flag this program has"))
+            (str "and names " flag " as it was typed, not as something parsed it")))))
 
   (testing "**a mode given a value that reads as false selects no mode**, which is
     the same fall-through by another spelling: `--verify false` and `--no-verify`
@@ -1074,6 +1082,10 @@
         (is (= 2 exit) (str (pr-str args) " is a mode that was not asked for"))
         (is (str/includes? err "Every flag here is a switch")
             (str "and says why, in this program's words: " (pr-str args)))
+        (is (str/includes? err (str (first args) " read as false"))
+            (str "naming the token that was typed — `--verify`, `--no-verify` and"
+                 " `--verify=false` are three different things to have written: "
+                 (pr-str args)))
         (is (= before (digest db)) (str (pr-str args) " left the file byte-identical")))))
 
   (testing "**a second database on the command line is a refusal too.** It was
@@ -1090,6 +1102,35 @@
       (is (str/includes? err b) "and it names the one that would have been ignored")
       (is (= before-a (digest a)) "and neither file was written")
       (is (= before-b (digest b)))))
+
+  (testing "**and the flag in the refusal is read off argv, not out of the
+    parser's message.** That is the whole reason the box and the host disagreed,
+    and these two are pure: they take the command line and nothing else, so there
+    is no version of anything for them to move with. Every case here is one the
+    refusal above has to get right."
+    (is (= ["--dryrun"] (unknown-flags ["--dryrun" "--user" "daniel" "a.db"])))
+    (is (= ["-n"] (unknown-flags ["-n" "--user" "daniel" "a.db"]))
+        "a short one is reported as short: `-n` is what was typed")
+    (is (= ["--verfiy" "--unsel"] (unknown-flags ["--verfiy" "--unsel" "--user" "d" "a.db"]))
+        "and two of them are two, in the order they were typed")
+    (is (= ["--nope"] (unknown-flags ["--nope=3" "a.db"]))
+        "an =value names the same flag, and the value is not the operator's mistake")
+    (is (= ["--dryrun"] (unknown-flags ["--dryrun" "--dryrun"])) "and it is said once")
+    (testing "and nothing this program does have is called unknown"
+      (is (= [] (unknown-flags ["--dry-run" "--user" "daniel" "a.db"])))
+      (is (= [] (unknown-flags ["-h"])) "including the alias")
+      (is (= [] (unknown-flags ["--no-verify" "a.db"]))
+          "a negation is known here and refused by the other rule, which is the one
+           that can say what is wrong with it")
+      (is (= [] (unknown-flags ["--user" "daniel" "a.db"]))
+          "and a value is not a flag, however it is spelled"))
+    (testing "`typed-as` shows which of the three ways a mode was switched off"
+      (is (= "--verify" (typed-as ["--verify" "false"] :verify)))
+      (is (= "--no-verify" (typed-as ["--no-verify"] :verify)))
+      (is (= "--verify=false" (typed-as ["--verify=false"] :verify)))
+      (is (= "--verify" (typed-as ["--dry-run"] :verify))
+          "and falls back to the plain spelling rather than guessing, which would
+           mean argv and the parser disagree")))
 
   (testing "and the flags it does have still work, which is what makes the above a
     fix rather than a wall"
