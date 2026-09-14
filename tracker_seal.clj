@@ -265,6 +265,38 @@
   (boolean (some (fn [[path _]] (rules/sealed? (get-in payload path)))
                  (prose-paths payload))))
 
+(defn- associable
+  "The same JSON tree with every sequential node a vector.
+
+  **cheshire answers a top-level JSON array with a `LazySeq`**, and a `LazySeq` is
+  not associative, so `update-in` through an integer index into one throws
+  `ClassCastException`. That is the whole of a live bug: `GET /api/tasks` — a
+  listing, an array at the top — could not be opened at all, while
+  `GET /api/tasks/1229` opened fine, its path being `[:description]` and never
+  touching an index. It shipped because a listing is the one shape no test built:
+  a fixture written in Clojure gives you a vector, and only the wire gives you
+  this.
+
+  Measured, and written down because the obvious guess is wrong: **it is only the
+  top level**. Every array cheshire parses *inside* an object is already a
+  `PersistentVector`, so `{:tasks [...]}` was never broken and `[...]` always
+  was.
+
+  The coercion is nonetheless written over the whole tree rather than the root
+  alone. That fact is one parser's internals, and this function's contract is
+  with *an already-parsed body* — `parse-stream`, another JSON library, or a
+  later cheshire is free to differ, and none of them should be able to put the
+  ciphertext back. Walking the tree costs a rebuild only when something is
+  actually sealed, which is the same condition that already costs crypto.
+
+  The browser needs none of this: `js->clj` yields vectors, so `seal.cljs` walks
+  these very paths with `assoc-in` and always could."
+  [x]
+  (cond
+    (map? x)        (reduce-kv (fn [m k v] (assoc m k (associable v))) x x)
+    (sequential? x) (mapv associable x)
+    :else           x))
+
 (defn unseal-response-body
   "Open every sealed value anywhere in one already-parsed response body — the CLI
   and proxy's read path, and the same walk the browser uses.
@@ -272,14 +304,22 @@
   `et.tr.seal-rules/body-prose-paths` is where the argument for a tree walk over a
   shape dispatch lives. The short version: tracker binds all nine body-carrying
   tables under one name, so nothing has to be classified before it can be opened,
-  and a new endpoint cannot silently go unsealed."
+  and a new endpoint cannot silently go unsealed.
+
+  **Whatever the body was parsed by, it is made associative first** — see
+  `associable`, which exists because a listing parsed by cheshire is a `LazySeq`
+  and this function could not open one. The coercion is gated behind the path
+  count, so a body with nothing sealed in it is still handed straight back, the
+  very same object: one walk, no crypto, no rebuild, which is every response
+  before the cutover and every response for a user who is not sealing."
   [k body]
-  (if (nil? k)
-    body
-    (reduce (fn [b [path aad-str]]
-              (update-in b path #(env/unseal-at k aad-str %)))
-            body
-            (body-prose-paths body))))
+  (let [paths (when k (body-prose-paths body))]
+    (if (empty? paths)
+      body
+      (reduce (fn [b [path aad-str]]
+                (update-in b path #(env/unseal-at k aad-str %)))
+              (associable body)
+              paths))))
 
 ;; ---------------------------------------------------------------------------
 ;; The write path, for a process that sees one request.

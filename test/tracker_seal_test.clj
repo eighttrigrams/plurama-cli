@@ -11,6 +11,7 @@
   the same code against cookbook's fixture. Between them, an edit to the cipher
   that satisfies one app and not the other cannot pass."
   (:require [clojure.test :refer [deftest is testing]]
+            [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.set]
@@ -506,6 +507,65 @@
     (is (= "created" (get-in out [:events 0 :payload :row :description])))
     (is (= "a plaintext inbox body" (get-in out [:messages 0 :description]))
         "never sealed, so never collected — the read path needs no opinion about tables")))
+
+(deftest a-listing-arrives-parsed-and-not-written-by-hand
+  ;; What this covers that every test above it cannot.
+  ;;
+  ;; Every other body in this file is a Clojure literal, and a literal `[...]` is
+  ;; a **vector** — associative, so `update-in` walks into it by index without
+  ;; complaint. Production bodies are not written by hand: they come off the wire
+  ;; through `json/parse-string`, and cheshire hands a **top-level JSON array
+  ;; back as a `LazySeq`**, which is not associative. `update-in` through an
+  ;; integer index into one throws `ClassCastException`, and
+  ;; `tracker-unseal-response` caught that and returned the response untouched —
+  ;; so `GET /api/tasks` served every body as `enc:v1:…` with a 200 and no error
+  ;; anywhere.
+  ;;
+  ;; The shape under test had therefore never been the shape in production, and
+  ;; no number of literal-built fixtures would have found it. So this one builds
+  ;; its body the way the CLI does: serialise, then parse. That is the whole
+  ;; point of it, and it is why the `generate-string` here is not ceremony for a
+  ;; later reader to optimise away.
+  ;;
+  ;; The detail read is asserted beside it deliberately. `/api/tasks/1229` kept
+  ;; working right through the outage, because its path is `[:description]` at
+  ;; top level and never touches an index — which is exactly what made the bug
+  ;; look like a key problem rather than a shape problem.
+  (let [k (test-key)
+        ct #(seal/seal k :tasks :description % nil)
+        parsed #(json/parse-string (json/generate-string %) true)
+        listing (parsed [{:id 1229 :title "t" :description (ct "abc 9")}
+                         {:id 1230 :title "u" :description (ct "abc 10")}])
+        detail (parsed {:id 1229 :title "t" :description (ct "abc 9")})]
+    (testing "the premise: a shape no literal in this file can produce"
+      (is (seq? listing) "cheshire parses a top-level JSON array to a LazySeq")
+      (is (not (associative? listing)) "…which update-in cannot walk into"))
+    (testing "a listing opens"
+      (let [out (seal/unseal-response-body k listing)]
+        (is (= ["abc 9" "abc 10"] (mapv :description out)))
+        (is (associative? out)
+            "and comes back associative, so a caller may get-in by index")))
+    (testing "a detail opens — it always did, which is what hid the listing"
+      (is (= "abc 9" (:description (seal/unseal-response-body k detail)))))
+    (testing "an array nested under a key opens too"
+      (is (= "nested"
+             (get-in (seal/unseal-response-body
+                      k (parsed {:tasks [{:id 1 :description (ct "nested")}]}))
+                     [:tasks 0 :description]))))))
+
+(deftest a-parsed-listing-with-nothing-sealed-still-passes-through
+  ;; The cheap path has to survive the coercion. `tracker-unseal-response` sends
+  ;; the original bytes on when `(= body out)`, and that is what keeps an
+  ;; unsealed database's responses byte-identical. This pins the stronger claim —
+  ;; the *same object* back — because a coercion applied before the paths were
+  ;; counted would rebuild every response in the estate, and nothing else here
+  ;; would have said so.
+  (let [body (json/parse-string
+              (json/generate-string [{:id 1 :description "not migrated yet"}])
+              true)
+        out (seal/unseal-response-body (test-key) body)]
+    (is (identical? body out)
+        "one walk, no crypto, no rebuild — every response before the cutover")))
 
 (deftest a-body-with-nothing-sealed-comes-back-identical
   (let [k (test-key)

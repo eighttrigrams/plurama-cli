@@ -6,6 +6,7 @@
   reads as well. Nothing in this file invents a ciphertext: if the two suites
   ever disagree about the envelope, one of them goes red here."
   (:require [clojure.test :refer [deftest is testing]]
+            [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.set]
@@ -596,6 +597,35 @@
         (let [stored (seal/seal k :recipes :description "a line meant for strangers")]
           (is (= stored (:description (seal/seal-write k {:table :recipes} body
                                                        {:stored {:description stored}})))))))))
+
+(deftest a-parsed-listing-opens-here-too-and-why-that-is-not-luck
+  ;; Cookbook survived the bug that took tracker's listings down, and it is worth
+  ;; pinning *why*, because the reason is incidental to the design rather than
+  ;; intended by it.
+  ;;
+  ;; cheshire hands a top-level JSON array back as a `LazySeq`, which is not
+  ;; associative. Tracker's read path collects `[path aad]` pairs and applies
+  ;; them with `update-in`, so an integer index into a `LazySeq` threw and every
+  ;; listing came back as `enc:v1:…` with a 200. `unseal-body` here never indexes
+  ;; anything: its listing clause is `(sequential? body)` followed by `mapv`,
+  ;; which *rebuilds* the collection and is perfectly happy with a lazy one.
+  ;;
+  ;; So the shape dispatch that cookbook's own review called the weaker design —
+  ;; it has to be taught each new endpoint, where a tree walk cannot forget one —
+  ;; is the one that was structurally immune here. That is a real trade and not a
+  ;; point for either side; what it means in practice is that this immunity is
+  ;; load-bearing and undocumented, and a later refactor toward tracker's path
+  ;; table would silently reintroduce the outage. Hence this test: it fails the
+  ;; moment somebody indexes into a body instead of mapping over it.
+  (let [k (test-key)
+        ct #(seal/seal k :recipes :description %)
+        listing (json/parse-string
+                 (json/generate-string [{:id 7 :version 3 :title "a" :description (ct "first")}
+                                        {:id 8 :version 1 :title "b" :description (ct "second")}])
+                 true)]
+    (is (seq? listing) "the premise: a top-level array parses to a LazySeq")
+    (is (= ["first" "second"] (mapv :description (seal/unseal-response-body k listing)))
+        "a listing opens — because unseal-body maps over it rather than indexing into it")))
 
 (deftest the-caution-question-is-asked-before-a-word-is-opened
   (testing "**the order is the whole of it.** `caution-over-ciphertext?` reads the

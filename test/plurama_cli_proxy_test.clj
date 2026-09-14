@@ -385,6 +385,30 @@
               "a category nested in a task, found without anyone remembering it is there")
           (is (= "a meeting note" (get-in b [:meets 0 :description]))))))))
 
+(deftest a-tracker-listing-is-opened-and-not-served-as-ciphertext
+  ;; The production symptom, end to end, and the one shape every upstream body
+  ;; above this one lacks: `/api/tasks` answers with a **top-level JSON array**.
+  ;;
+  ;; The proxy parses what it is handed with cheshire, cheshire hands a top-level
+  ;; array back as a `LazySeq`, and `update-in` through an integer index into one
+  ;; throws `ClassCastException`. `unseal-on-the-way-back` caught that and
+  ;; answered `nil`, which means *forward it unchanged* — so every agent in the
+  ;; box read `enc:v1:…` bodies with a 200 and nothing in the proxy log. The
+  ;; detail read beside it never stopped working, because its path is
+  ;; `[:description]` and never touches an index.
+  ;;
+  ;; This goes over the loopback upstream rather than calling the seal directly,
+  ;; deliberately: the broken shape only exists once something has been
+  ;; serialised and parsed again, and that round trip is exactly the step a
+  ;; hand-written fixture skips.
+  (let [ct #(tracker-seal/seal @tracker-test-key :tasks :description % nil)]
+    (with-upstream {"/api/tasks" {:body [{:id 1229 :title "t" :description (ct "abc 9")}
+                                         {:id 1230 :title "u" :description (ct "abc 10")}]}}
+      (fn [up]
+        (let [b (body-of (request up (tracker-keys) {:method :get :uri "/tracker/api/tasks"}))]
+          (is (= ["abc 9" "abc 10"] (mapv :description b))
+              "a listing reads as prose, as the detail beside it always did"))))))
+
 (deftest an-unchanged-tracker-body-echoes-rather-than-re-sealing
   (let [ct (tracker-seal/seal @tracker-test-key :tasks :description "unchanged" nil)]
     (with-upstream {"/api/tasks/7" {:body {:id 7 :description ct}}}
