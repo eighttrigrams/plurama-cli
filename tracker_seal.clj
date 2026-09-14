@@ -28,7 +28,7 @@
   party that knows who is asking. A CLI that tried to decide would be guessing
   from a username, and a guess that seals antonio's rows is not recoverable.
 
-  ## The binding: ten tables, one name
+  ## The binding: nine tables, one name
 
   `item/description`, for all of them. That is not laziness, it is the schema
   being told the truth — the same argument cookbook's `bound-as` makes, arriving
@@ -270,9 +270,9 @@
   and proxy's read path, and the same walk the browser uses.
 
   `et.tr.seal-rules/body-prose-paths` is where the argument for a tree walk over a
-  shape dispatch lives. The short version: tracker binds all ten tables under one
-  name, so nothing has to be classified before it can be opened, and a new
-  endpoint cannot silently go unsealed."
+  shape dispatch lives. The short version: tracker binds all nine body-carrying
+  tables under one name, so nothing has to be classified before it can be opened,
+  and a new endpoint cannot silently go unsealed."
   [k body]
   (if (nil? k)
     body
