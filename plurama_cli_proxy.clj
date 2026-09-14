@@ -417,6 +417,11 @@
                      :sealed (count (remove (fn [[c v]] (= v (get stored c))) moved))
                      :echoed (count (filter (fn [[c v]] (= v (get stored c))) moved))}))))))))))
 
+;; `log!` is defined below, with the rest of the sidecar's plumbing. It is
+;; reached from here because a response that would not open is exactly the kind
+;; of decision that log is for — see `unseal-incoming`.
+(declare log!)
+
 (defn- unseal-incoming
   "A cookbook response, opened on the way back. `{:body …}` when anything changed,
   `nil` when nothing did — including every response on a box with no key
@@ -443,12 +448,28 @@
   nothing to say why."
   [sealer k resp]
   (when (and k (json-body? resp) (seq (:body resp)))
-    (try
-      (let [parsed (json/parse-string (:body resp) true)
-            out ((:unseal-response-body sealer) k parsed)]
-        (when-not (= parsed out)
-          {:body (json/generate-string out)}))
-      (catch Exception _ nil))))
+    (let [parsed (try (json/parse-string (:body resp) true)
+                      (catch Exception _ ::unparseable))]
+      (when-not (= ::unparseable parsed)
+        (try
+          (let [out ((:unseal-response-body sealer) k parsed)]
+            (when-not (= parsed out)
+              {:body (json/generate-string out)}))
+          (catch Exception e
+            ;; **Not the same failure as a body that would not parse, and the
+            ;; difference is why this is two `try`s and not one.** A body that
+            ;; will not parse is expected and silent. A body that parses and then
+            ;; will not open is a defect in this sidecar, and one `try` around
+            ;; both of them turned `ClassCastException` on every tracker listing
+            ;; into a forwarded 200 full of `enc:v1:…` — every agent in the box
+            ;; reading ciphertext, and this log, which records every other
+            ;; decision the proxy makes, saying nothing at all.
+            ;;
+            ;; It still forwards rather than failing the request: rule 3's shape
+            ;; is right for a read path, one bad body beside everything that
+            ;; reads. It just says so now.
+            (log! "LEFT-SEALED" (ex-message e))
+            nil))))))
 
 ;; ---------------------------------------------------------------------------
 

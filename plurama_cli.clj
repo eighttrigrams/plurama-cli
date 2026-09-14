@@ -308,6 +308,43 @@
             (json/generate-string sealed)
             body))))))
 
+(defn- opened-or-warn
+  "Parse, unseal, re-serialise — **keeping the two failures apart**, because they
+  are not the same failure and conflating them hid a live bug for a whole
+  cutover.
+
+  A body that will not *parse* is expected and stays silent. An endpoint that
+  answers HTML behind a JSON content-type, a proxy error page, a 204 with a
+  content-type it did not mean: there is nothing to open and nothing to say.
+
+  A body that parses and then will not *open* is a defect in this program, and it
+  has to be audible. Rule 3 — unsealing never throws — is about a value that will
+  not decrypt, and `seal-envelope/unseal-at` already honours it one level down by
+  handing such a value back untouched, which is why one unreadable column shows
+  as `enc:v1:…` beside everything that reads. Rule 3 was never about a
+  *structural* failure. When `unseal-response-body` threw `ClassCastException` on
+  every listing cheshire handed it, a single `try` around both steps dressed that
+  up as rule 3 and returned ciphertext with a 200 — no error, no log line,
+  nothing to search for. Both callers' docstrings already said a swallowed
+  failure here 'would return the whole response still sealed and say nothing
+  about why'. They were right. The `try` was drawn around one step too many.
+
+  It still degrades rather than dying: one bad body should not cost an agent a
+  whole listing, and that is the right shape for a read path. It simply stops
+  being quiet about it. **stderr**, so the JSON on stdout stays exactly as
+  pipeable as it was — an agent's `| jq` must not start eating a warning."
+  [resp unseal]
+  (let [body (try (json/parse-string (:body resp) true)
+                  (catch Exception _ ::unparseable))]
+    (if (= ::unparseable body)
+      resp
+      (try (let [out (unseal body)]
+             (if (= body out) resp (assoc resp :body (json/generate-string out))))
+           (catch Exception e
+             (binding [*out* *err*]
+               (println "plurama-cli: response left sealed —" (ex-message e)))
+             resp)))))
+
 (defn- tracker-unseal-response
   "Every tracker response, including refusals — a 400 from the seal guard names a
   column and carries no prose, but a 409 from the optimistic-concurrency guard
@@ -326,10 +363,7 @@
   (let [k @tracker-seal-key]
     (if-not (and k (json-response? resp) (seq (:body resp)))
       resp
-      (try (let [body (json/parse-string (:body resp) true)
-                 out (tracker-seal/unseal-response-body k body)]
-             (if (= body out) resp (assoc resp :body (json/generate-string out))))
-           (catch Exception _ resp)))))
+      (opened-or-warn resp #(tracker-seal/unseal-response-body k %)))))
 
 (defn- refuse-sealed-publish!
   "Publishing hands the prose to somebody who has no key and must never have one,
@@ -399,13 +433,10 @@
   (let [k @seal-key]
     (if-not (and (json-response? resp) (seq (:body resp)))
       resp
-      (try (let [body (json/parse-string (:body resp) true)
-                 ;; Both steps, in the order `seal/unseal-response-body` explains —
-                 ;; and `unseal-body` is a no-op with no key by its own first
-                 ;; clause, so they compose without a second test for one.
-                 out (seal/unseal-response-body k body)]
-             (if (= body out) resp (assoc resp :body (json/generate-string out))))
-           (catch Exception _ resp)))))
+      ;; Both steps, in the order `seal/unseal-response-body` explains — and
+      ;; `unseal-body` is a no-op with no key by its own first clause, so they
+      ;; compose without a second test for one.
+      (opened-or-warn resp #(seal/unseal-response-body k %)))))
 
 (def ^:private cli-spec
   {:method {:desc "HTTP method (default GET, or POST when --body is given)"}
