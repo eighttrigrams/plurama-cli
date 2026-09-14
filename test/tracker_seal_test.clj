@@ -56,7 +56,7 @@
 (deftest the-binding-is-the-one-the-fixture-names
   (is (= (into {} (for [[t b] (:binding @fixture)] [t (keyword b)]))
          seal/bound-as)
-      "ten tables under one binding, plus events under its own — see bound-as"))
+      "nine tables under one binding, plus events under its own — see bound-as"))
 
 (deftest the-inventory-is-the-one-the-fixture-names
   (is (= (into {} (for [[t cs] (:sealed-columns @fixture)] [t (mapv keyword cs)]))
